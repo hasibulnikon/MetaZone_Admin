@@ -31,7 +31,7 @@
   const fmtDay = (iso) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); };
   const num = (n) => (n == null ? '—' : Number(n).toLocaleString());
   function toast(msg, err) {
-    const t = h('div', { class: 'toast' + (err ? ' err' : '') }, msg);
+    const t = h('div', { class: 'toast' + (err ? ' err' : '') }, (err ? '⚠ ' : '✓ ') + msg);
     document.getElementById('toasts').append(t);
     setTimeout(() => t.remove(), err ? 7000 : 3500);
   }
@@ -45,14 +45,18 @@
     catch (e) { toast(e.message, true); throw e; }
   }
   function modal(title, body, buttons) {
-    const close = () => ov.remove();
+    const close = () => { document.removeEventListener('keydown', onKey); ov.remove(); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
     const foot = h('div', { class: 'foot' }, buttons.map((b) => h('button', {
       class: 'btn ' + (b.cls || ''), type: 'button',
       onclick: async (ev) => { ev.target.disabled = true; try { const keep = await b.run(close); if (keep === true) ev.target.disabled = false; } catch (e) { ev.target.disabled = false; } },
     }, b.label)));
     const ov = h('div', { class: 'overlay', role: 'dialog' }, h('div', { class: 'modal' }, h('h2', {}, title), body, foot));
     ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(); });
+    document.addEventListener('keydown', onKey);
     document.body.append(ov);
+    const first = ov.querySelector('input, textarea, select');
+    if (first) setTimeout(() => first.focus(), 30);
     return close;
   }
   const confirmBox = (title, text, label, run) => modal(title, h('p', {}, text), [
@@ -93,14 +97,14 @@
     const nav = h('div', { class: 'nav' }, TABS.map(([id, label]) => h('button', { 'data-tab': id, class: id === tab ? 'on' : '', onclick: () => go(id) }, label)));
     app.replaceChildren(h('div', { class: 'shell' },
       h('div', { class: 'side' }, h('div', { class: 'brand' }, 'Meta', h('span', {}, 'Zone'), ' Admin'), nav,
-        h('div', { class: 'who' }, adminEmail, h('br'), h('button', { class: 'btn small', id: 'btn-signout', onclick: signOut }, 'Sign out'))),
+        h('div', { class: 'who' }, adminEmail, h('button', { class: 'btn small', id: 'btn-signout', onclick: signOut }, 'Sign out'))),
       h('div', { class: 'main', id: 'main' })));
     go(tab);
   }
   function go(id) {
     tab = id; clearInterval(refreshTimer);
     document.querySelectorAll('.nav button').forEach((b) => b.classList.toggle('on', b.dataset.tab === id));
-    const main = document.getElementById('main'); main.replaceChildren(h('p', { class: 'hint' }, 'Loading…'));
+    const main = document.getElementById('main'); main.replaceChildren(h('div', { class: 'skel' }, h('span', { class: 'spin' }), 'Loading…'));
     const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, payment: pagePayment, notices: pageNotices, version: pageVersion }[id];
     page(main).catch((e) => main.replaceChildren(h('p', { class: 'warn' }, 'Error: ' + e.message)));
   }
