@@ -331,18 +331,58 @@
 
   // ------------------------------------------------------------ app version
   async function pageVersion(main) {
-    const o = await rpc('admin_overview');
-    const v = h('input', { type: 'text', id: 'ver-version', placeholder: 'v0.9.9.2', value: o.app.latest_version || '' });
-    const notes = h('input', { type: 'text', id: 'ver-notes', placeholder: 'What is new (short)' });
-    const url = h('input', { type: 'url', id: 'ver-url', placeholder: 'https://github.com/…/releases/download/…/MetaZone.exe' });
-    main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'App version')),
-      h('p', { class: 'hint' }, 'The latest release. MetaZone apps on an older version show an “update available” banner with a Download button that opens this link (https only).'),
-      h('div', { class: 'card' }, h('div', { class: 'field' }, h('label', {}, 'Latest version'), v), h('div', { class: 'field' }, h('label', {}, 'Notes'), notes),
-        h('div', { class: 'field' }, h('label', {}, 'Download URL'), url),
-        h('button', { class: 'btn primary', id: 'btn-save-version', onclick: async () => {
-          if (!v.value.trim()) return toast('Enter the version', true);
-          await act(() => rpc('admin_set_latest_version', { p_version: v.value.trim(), p_notes: notes.value || null, p_url: url.value || null }), 'Latest version saved');
-        } }, 'Save')));
+    const list = await rpc('admin_list_versions');
+    const rows = h('tbody', { id: 'ver-rows' }, list.map((v) => h('tr', { 'data-version': v.version },
+      h('td', {}, v.version),
+      h('td', {},
+        v.is_active ? h('span', { class: 'dot on' }) : h('span', { class: 'dot' }),
+        v.is_active ? 'Active' : 'Inactive',
+        v.is_latest ? h('span', { class: 'badge premium', style: 'margin-left:6px' }, 'Latest') : null),
+      h('td', {}, fmtDay(v.released_at)),
+      h('td', { style: 'white-space:normal;max-width:280px' }, v.update_title || '—'),
+      h('td', { class: 'actions' },
+        h('button', { class: 'btn small', 'data-act': 'edit', onclick: () => versionModal(v) }, 'Edit'),
+        h('button', { class: 'btn small' + (v.is_active ? ' danger' : ''), 'data-act': 'toggle', onclick: async () => {
+          await act(() => rpc('admin_set_version_active', { p_version: v.version, p_active: !v.is_active })); go('version');
+        } }, v.is_active ? 'Deactivate' : 'Activate')))));
+    main.replaceChildren(
+      h('div', { class: 'toolbar' }, h('h2', {}, 'App version'),
+        h('button', { class: 'btn primary', id: 'btn-new-version', onclick: () => versionModal(null) }, 'New version')),
+      h('p', { class: 'hint' },
+        'Only one version can be Latest, and Latest is always Active. MetaZone checks its own version against this list on every heartbeat and before every generation batch: Active keeps running, Inactive is forced to update — no “Later”.'),
+      h('div', { class: 'tablewrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Version', 'Status', 'Released', 'Update title', 'Actions'].map((x) => h('th', {}, x)))),
+        rows)));
+  }
+  function versionModal(v) {
+    const version = h('input', { type: 'text', id: 'ver-version', placeholder: 'v0.9.9.3', value: v ? v.version : '', disabled: !!v });
+    const active = h('input', { type: 'checkbox', id: 'ver-active' }); active.checked = v ? v.is_active : true;
+    const latest = h('input', { type: 'checkbox', id: 'ver-latest' }); latest.checked = v ? v.is_latest : false;
+    const url = h('input', { type: 'url', id: 'ver-url', placeholder: 'https://drive.google.com/…', value: v ? (v.download_url || '') : '' });
+    const title = h('input', { type: 'text', id: 'ver-title', placeholder: 'What is new (short)', value: v ? (v.update_title || '') : '' });
+    const features = h('textarea', { id: 'ver-features', placeholder: 'New features (one per line)' }, v ? (v.features || '') : '');
+    const bugfixes = h('textarea', { id: 'ver-bugfixes', placeholder: 'Bug fixes (one per line)' }, v ? (v.bugfixes || '') : '');
+    const notes = h('input', { type: 'text', id: 'ver-notes', placeholder: 'Internal notes (optional)', value: v ? (v.notes || '') : '' });
+    modal(v ? `Edit ${v.version}` : 'New version', h('div', {},
+      h('div', { class: 'field' }, h('label', {}, 'Version'), version),
+      h('div', { class: 'row' }, h('label', {}, active, ' Active'), h('label', {}, latest, ' Latest')),
+      h('div', { class: 'field' }, h('label', {}, 'Download URL'), url),
+      h('div', { class: 'field' }, h('label', {}, 'Update title'), title),
+      h('div', { class: 'field' }, h('label', {}, 'Features'), features),
+      h('div', { class: 'field' }, h('label', {}, 'Bug fixes'), bugfixes),
+      h('div', { class: 'field' }, h('label', {}, 'Notes'), notes)),
+    [{ label: 'Cancel', run: (c) => c() }, { label: 'Save', cls: 'primary', run: async (c) => {
+      const ver = (v ? v.version : version.value).trim();
+      if (!ver) { toast('Enter the version', true); return true; }
+      if (latest.checked && !active.checked) { toast('A version marked Latest must also be Active', true); return true; }
+      await act(() => rpc('admin_upsert_version', {
+        p_version: ver, p_active: active.checked, p_latest: latest.checked,
+        p_download_url: url.value.trim() || null, p_update_title: title.value.trim() || null,
+        p_features: features.value.trim() || null, p_bugfixes: bugfixes.value.trim() || null,
+        p_notes: notes.value.trim() || null,
+      }), 'Version saved');
+      c(); go('version');
+    } }]);
   }
 
   // --------------------------------------------------------------- start
