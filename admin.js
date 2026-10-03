@@ -91,7 +91,7 @@
   }
 
   // ----------------------------------------------------------------- shell
-  const TABS = [['overview', 'Overview'], ['users', 'Users'], ['limits', 'Limits & Offers'], ['payment', 'Premium payment info'],
+  const TABS = [['overview', 'Overview'], ['users', 'Users'], ['limits', 'Limits & Offers'], ['pages', 'Pages'], ['payment', 'Premium payment info'],
                 ['notices', 'Notices'], ['version', 'App version']];
   function shell() {
     const nav = h('div', { class: 'nav' }, TABS.map(([id, label]) => h('button', { 'data-tab': id, class: id === tab ? 'on' : '', onclick: () => go(id) }, label)));
@@ -105,7 +105,7 @@
     tab = id; clearInterval(refreshTimer);
     document.querySelectorAll('.nav button').forEach((b) => b.classList.toggle('on', b.dataset.tab === id));
     const main = document.getElementById('main'); main.replaceChildren(h('div', { class: 'skel' }, h('span', { class: 'spin' }), 'Loading…'));
-    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, payment: pagePayment, notices: pageNotices, version: pageVersion }[id];
+    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, payment: pagePayment, notices: pageNotices, version: pageVersion }[id];
     page(main).catch((e) => main.replaceChildren(h('p', { class: 'warn' }, 'Error: ' + e.message)));
   }
 
@@ -164,6 +164,7 @@
       h('td', {}, u.premium_expires_at ? fmtDay(u.premium_expires_at) : '—'),
       h('td', { class: 'actions' },
         h('button', { class: 'btn small gold', 'data-act': 'premium', onclick: () => premiumModal(u, reload) }, isPrem ? 'Extend / edit' : 'Activate Premium'),
+        h('button', { class: 'btn small', 'data-act': 'pages', onclick: () => userPagesModal(u) }, 'Pages'),
         h('button', { class: 'btn small', 'data-act': 'suspend', onclick: () => suspendToggle(u, reload) }, u.status === 'suspended' ? 'Restore' : 'Suspend'),
         h('button', { class: 'btn small', 'data-act': 'details', onclick: () => detailsModal(u) }, 'Details')));
   }
@@ -327,6 +328,57 @@
         p_starts_at: st.value ? new Date(st.value).toISOString() : null, p_ends_at: en.value ? new Date(en.value).toISOString() : null,
         p_show_immediately: now.checked, p_priority: Number(pr.value || 0) }), 'Notice saved');
       c(); go('notices'); } }]);
+  }
+
+  // ------------------------------------------------------------------ pages
+  // v0.9.9.4: switch the app's pages on/off -- for everyone (this tab) or for one user (Users -> Pages).
+  // A per-user setting beats the global one. Home and Settings are locked (always on). The app hides a
+  // switched-off page; for the three AI pages (Meta, Image to Prompt, Prompt-to-Prompt) the server also
+  // refuses their generation batches.
+  async function pagePages(main) {
+    const list = await rpc('admin_list_pages');
+    const rows = h('tbody', { id: 'page-rows' }, list.map((p) => h('tr', { 'data-page': p.page_key },
+      h('td', {}, p.label), h('td', {}, h('code', {}, p.page_key)),
+      h('td', {}, h('span', { class: 'dot' + (p.enabled ? ' on' : '') }), p.locked ? 'Always on' : (p.enabled ? 'On for everyone' : 'Off for everyone')),
+      h('td', {}, p.overrides_on || p.overrides_off
+        ? [p.overrides_on ? h('span', { class: 'badge', style: 'margin-right:6px' }, `${p.overrides_on} forced on`) : null,
+           p.overrides_off ? h('span', { class: 'badge suspended' }, `${p.overrides_off} forced off`) : null]
+        : '—'),
+      h('td', { class: 'actions' }, p.locked ? '—' :
+        h('button', { class: 'btn small' + (p.enabled ? ' danger' : ''), 'data-act': 'toggle', onclick: async () => {
+          const go2 = async () => { await act(() => rpc('admin_set_page_enabled', { p_key: p.page_key, p_enabled: !p.enabled }), `${p.label} turned ${p.enabled ? 'off' : 'on'}`); go('pages'); };
+          if (p.enabled) confirmBox(`Turn off ${p.label}?`, 'It disappears for every user, except accounts you have forced it ON for. Their data is not touched.', 'Turn off', go2); else go2();
+        } }, p.enabled ? 'Turn off' : 'Turn on')))));
+    main.replaceChildren(
+      h('div', { class: 'toolbar' }, h('h2', {}, 'Pages')),
+      h('p', { class: 'hint' }, 'The global switch decides whether a page exists for everybody. To sell a smaller plan, leave the page on here and switch it off for that one customer (Users → Pages); to beta-test a new page, switch it off here and force it on for your own account. Home and Settings can never be switched off. Users see the change within a few minutes (next heartbeat), or right away on their next generation attempt.'),
+      h('div', { class: 'tablewrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Page', 'Key', 'Global', 'Per-user exceptions', 'Actions'].map((x) => h('th', {}, x)))), rows)));
+  }
+  async function userPagesModal(u) {
+    const body = h('div', { id: 'user-pages' });
+    const render = (list) => body.replaceChildren(
+      h('p', { class: 'hint' }, 'Force a page on or off for just this account. “Follow global” removes the exception.'),
+      h('div', { class: 'tablewrap' }, h('table', { style: 'min-width:0' },
+        h('thead', {}, h('tr', {}, ['Page', 'Global', 'This user', 'Result'].map((x) => h('th', {}, x)))),
+        h('tbody', {}, list.map((p) => {
+          const sel = h('select', { 'data-page': p.page_key, disabled: p.locked },
+            [['', 'Follow global'], ['on', 'Force on'], ['off', 'Force off']].map(([v, l]) => h('option', { value: v }, l)));
+          sel.value = p.override === true ? 'on' : p.override === false ? 'off' : '';
+          sel.addEventListener('change', async () => {
+            try {
+              render(await act(() => rpc('admin_set_user_page', { p_user: u.id, p_key: p.page_key, p_enabled: sel.value === '' ? null : sel.value === 'on' }), `${p.label} updated`));
+            } catch (e) { /* act() already toasted */ }
+          });
+          return h('tr', { 'data-page': p.page_key }, h('td', {}, p.label),
+            h('td', {}, p.locked ? 'Always on' : (p.global_enabled ? 'On' : 'Off')),
+            h('td', {}, p.locked ? '—' : sel),
+            h('td', {}, h('span', { class: 'badge' + (p.effective ? '' : ' suspended') }, p.effective ? 'Enabled' : 'Disabled')));
+        })))));
+    render(await act(() => rpc('admin_get_user_pages', { p_user: u.id })));
+    modal(`Pages — ${u.email}`, body, [
+      { label: 'Reset all to global', run: async () => { render(await act(() => rpc('admin_reset_user_pages', { p_user: u.id }), 'Reset to global')); return true; } },
+      { label: 'Close', run: (c) => c() }]);
   }
 
   // ------------------------------------------------------------ app version

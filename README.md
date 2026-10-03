@@ -1,4 +1,4 @@
-# MetaZone Admin  (v0.9.9.2)
+# MetaZone Admin  (v0.9.9.4)
 
 Your control panel: users, Premium activation, **limits & offers per plan**, unlimited-Free bonus, payment info,
 notices, app version. A static site (no server of its own): it talks to your Supabase project, and **every
@@ -6,7 +6,7 @@ action is a database function that only works for accounts listed in `admin_user
 cosmetic, the server refuses everyone else (tested). No secret key is used or needed.
 
 ## One-time setup
-1. Supabase SQL Editor: run the SQL files `0001…` through `0004…` **in that order, once each** (folder `database/` in this download; it is `supabase/migrations/` in the main MetaZone project).
+1. Supabase SQL Editor: run the SQL files `0001…` through `0006…` **in that order, once each** (0006 = page on/off switches; if you already ran 0001–0005, run only 0006) (folder `database/` in this download; it is `supabase/migrations/` in the main MetaZone project).
 2. Supabase → Authentication → URL Configuration → Redirect URLs: add
    `http://localhost:5173/`   (and, if you host the site, its exact URL, e.g. `https://hasibulnikon.github.io/metazone-releases/admin/`).
 3. Make yourself an admin (SQL Editor; sign in to the admin site once first so your account exists):
@@ -26,6 +26,7 @@ the site works without any CDN.
 * **Users** -- search, Activate / Extend / set expiry / Deactivate Premium, Suspend / Restore, per-user usage + history.
 * **Limits & Offers** -- for Free and Premium separately: daily limit, weekly limit, API keys per provider; each one a number or *Unlimited*.
   **Bonus**: unlimited Free generations for 1/3/7/30 days or until a date -- it ends by itself. Advanced: batch size, slot hold time, online threshold.
+* **Pages** -- switch each app page (Meta, Image to Prompt, Embed, Prompt-to-Prompt, Batch, Tracker, API Manager) on or off for everyone. For one customer: **Users → Pages** forces a page on or off for that account only (beats the global switch), e.g. a cheaper plan without Batch, or Tracker on for you only while it is off for everyone. Home and Settings are always on.
 * **Premium payment info** -- bKash number, price, contact, instructions shown in the app.
 * **Notices** -- shown in the app as a right-to-left ticker under the header (each notice once per day per user, priority first).
 * **App version** -- set the latest release + download link; apps on an older version show an update banner.
