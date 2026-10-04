@@ -410,7 +410,7 @@
     const version = h('input', { type: 'text', id: 'ver-version', placeholder: 'v0.9.9.3', value: v ? v.version : '', disabled: !!v });
     const active = h('input', { type: 'checkbox', id: 'ver-active' }); active.checked = v ? v.is_active : true;
     const latest = h('input', { type: 'checkbox', id: 'ver-latest' }); latest.checked = v ? v.is_latest : false;
-    const url = h('input', { type: 'url', id: 'ver-url', placeholder: 'https://drive.google.com/…', value: v ? (v.download_url || '') : '' });
+    const url = h('input', { type: 'url', id: 'ver-url', placeholder: 'https://…/MetaZone_Setup_0.9.9.5.exe  (direct installer link = in-app update)', value: v ? (v.download_url || '') : '' });
     const title = h('input', { type: 'text', id: 'ver-title', placeholder: 'What is new (short)', value: v ? (v.update_title || '') : '' });
     const features = h('textarea', { id: 'ver-features', placeholder: 'New features (one per line)' }, v ? (v.features || '') : '');
     const bugfixes = h('textarea', { id: 'ver-bugfixes', placeholder: 'Bug fixes (one per line)' }, v ? (v.bugfixes || '') : '');

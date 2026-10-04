@@ -1,4 +1,4 @@
-# MetaZone Admin  (v0.9.9.4)
+# MetaZone Admin  (v0.9.9.5)
 
 Your control panel: users, Premium activation, **limits & offers per plan**, unlimited-Free bonus, payment info,
 notices, app version. A static site (no server of its own): it talks to your Supabase project, and **every
@@ -6,7 +6,7 @@ action is a database function that only works for accounts listed in `admin_user
 cosmetic, the server refuses everyone else (tested). No secret key is used or needed.
 
 ## One-time setup
-1. Supabase SQL Editor: run the SQL files `0001…` through `0006…` **in that order, once each** (0006 = page on/off switches; if you already ran 0001–0005, run only 0006) (folder `database/` in this download; it is `supabase/migrations/` in the main MetaZone project).
+1. Supabase SQL Editor: run the SQL files `0001…` through `0007…` **in that order, once each** (0006 = page on/off switches; 0007 = Adobe Tracker joins the page switch; if you already ran 0001–0006, run only 0007 — it is optional, the app works without it) (folder `database/` in this download; it is `supabase/migrations/` in the main MetaZone project).
 2. Supabase → Authentication → URL Configuration → Redirect URLs: add
    `http://localhost:5173/`   (and, if you host the site, its exact URL, e.g. `https://hasibulnikon.github.io/metazone-releases/admin/`).
 3. Make yourself an admin (SQL Editor; sign in to the admin site once first so your account exists):
@@ -32,3 +32,8 @@ the site works without any CDN.
 * **App version** -- set the latest release + download link; apps on an older version show an update banner.
 
 Apps see changed limits on their next refresh (heartbeat, a few minutes) and always at the start of a batch.
+
+## Updates (v0.9.9.5)
+Admin → App version → **Download URL** should be a **direct https link to the installer `.exe`** (for example a GitHub
+release asset). The app then downloads it inside its own window (progress + speed) and installs it with the same Inno
+installer as before. If the link is a web page instead, the app notices and opens it in the browser, as in earlier versions.
