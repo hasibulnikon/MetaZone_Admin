@@ -91,7 +91,7 @@
   }
 
   // ----------------------------------------------------------------- shell
-  const TABS = [['overview', 'Overview'], ['users', 'Users'], ['limits', 'Limits & Offers'], ['pages', 'Pages'], ['payment', 'Premium payment info'],
+  const TABS = [['overview', 'Overview'], ['users', 'Users'], ['limits', 'Limits & Offers'], ['pages', 'Pages'], ['ai', 'API Configuration'], ['payment', 'Premium payment info'],
                 ['notices', 'Notices'], ['version', 'App version']];
   function shell() {
     const nav = h('div', { class: 'nav' }, TABS.map(([id, label]) => h('button', { 'data-tab': id, class: id === tab ? 'on' : '', onclick: () => go(id) }, label)));
@@ -105,7 +105,7 @@
     tab = id; clearInterval(refreshTimer);
     document.querySelectorAll('.nav button').forEach((b) => b.classList.toggle('on', b.dataset.tab === id));
     const main = document.getElementById('main'); main.replaceChildren(h('div', { class: 'skel' }, h('span', { class: 'spin' }), 'Loading…'));
-    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, payment: pagePayment, notices: pageNotices, version: pageVersion }[id];
+    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, ai: pageAi, payment: pagePayment, notices: pageNotices, version: pageVersion }[id];
     page(main).catch((e) => main.replaceChildren(h('p', { class: 'warn' }, 'Error: ' + e.message)));
   }
 
@@ -113,7 +113,7 @@
   const stat = (n, l, cls) => h('div', { class: 'stat ' + (cls || '') }, h('div', { class: 'n' }, num(n)), h('div', { class: 'l' }, l));
   async function pageOverview(main) {
     const draw = async () => {
-      const o = await rpc('admin_overview'); const u = o.users, g = o.generations, s = o.subscriptions, a = o.app;
+      const o = await rpc('admin_overview'); const ts = await rpc('admin_tracker_search_stats'); const u = o.users, g = o.generations, s = o.subscriptions, a = o.app;
       main.replaceChildren(
         h('div', { class: 'toolbar' }, h('h2', {}, 'Overview'), h('button', { class: 'btn small', onclick: draw }, 'Refresh')),
         h('h3', {}, 'Users'), h('div', { class: 'grid', id: 'stats-users' },
@@ -122,6 +122,9 @@
         h('h3', {}, 'Generations'), h('div', { class: 'grid', id: 'stats-gen' },
           stat(g.total, 'Total'), stat(g.today, 'Today'), stat(g.week, 'This week'), stat(g.month, 'This month'),
           stat(g.free, 'Free plan'), stat(g.premium, 'Premium plan', 'gold'), stat(g.failed, 'Failed')),
+        h('h3', {}, 'Adobe Tracker searches'), h('div', { class: 'grid', id: 'stats-tracker' },
+          stat(ts.total, 'Total searches'), stat(ts.today, 'Today'), stat(ts.week, 'This week'), stat(ts.month, 'This month'), stat(ts.users_today, 'Users searching today')),
+        h('p', { class: 'hint' }, 'Searches started in Adobe Tracker only. Not generations, not Image-to-Prompt jobs, not Apify usage.'),
         h('h3', {}, 'Subscriptions'), h('div', { class: 'grid', id: 'stats-subs' },
           stat(s.active_premium, 'Active premium', 'gold'), stat(s.expiring_soon, 'Expiring in 7 days'), stat(s.expired, 'Expired'), stat(s.recently_activated, 'Activated (7 days)')),
         h('h3', {}, 'Application'),
@@ -136,13 +139,13 @@
   const PAGE = 50;
   async function pageUsers(main) {
     let offset = 0; let search = ''; const rows = h('tbody', { id: 'user-rows' }); const more = h('button', { class: 'btn', id: 'btn-more', onclick: () => load(true) }, 'Load more');
-    const box = h('input', { type: 'search', id: 'user-search', placeholder: 'Search by Google email…', style: 'width:280px' });
+    const box = h('input', { type: 'search', id: 'user-search', placeholder: 'Search by email or nickname…', style: 'width:280px' });
     let t; box.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { search = box.value.trim(); load(false); }, 250); });
     const cfgNow = await rpc('admin_get_config');
     const threshold = Number(cfgNow.online_threshold_seconds || 600);
     main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'Users'), box, h('button', { class: 'btn small', onclick: () => load(false) }, 'Refresh')),
       h('div', { class: 'tablewrap' }, h('table', {}, h('thead', {}, h('tr', {},
-        ['Google account', 'Plan', 'Status', 'Last seen', 'Version', 'Today', 'Week', 'Month', 'Total', 'Premium expires', 'Actions'].map((c) => h('th', {}, c)))), rows)),
+        ['Nickname', 'Email', 'Plan', 'Status', 'Last seen', 'Version', 'Today', 'Week', 'Month', 'Total', 'Tracker searches', 'Premium expires', 'Actions'].map((c) => h('th', {}, c)))), rows)),
       h('p', {}, more));
     async function load(append) {
       if (!append) { offset = 0; rows.replaceChildren(); }
@@ -155,18 +158,43 @@
   function userRow(u, threshold, reload) {
     const online = u.last_seen_at && (Date.now() - new Date(u.last_seen_at).getTime()) < threshold * 1000;
     const isPrem = u.plan === 'premium';
+    const nick = h('input', { type: 'text', class: 'nick', maxlength: '60', placeholder: 'add nickname', value: u.nickname || '', 'aria-label': 'Nickname for ' + u.email, 'data-nick': u.id });
+    let last = u.nickname || '';
+    const saveNick = async () => {                       // admin-only display name: stored in profiles.nickname, never touches the sign-in identity
+      const v = nick.value.trim(); if (v === last) { nick.value = v; return; }
+      try { await act(() => rpc('admin_set_nickname', { p_user: u.id, p_nickname: v || null }), v ? 'Nickname saved' : 'Nickname cleared'); last = v; nick.value = v; }
+      catch (e) { nick.value = last; }
+    };
+    nick.addEventListener('change', saveNick);
+    nick.addEventListener('keydown', (e) => { if (e.key === 'Enter') nick.blur(); if (e.key === 'Escape') { nick.value = last; nick.blur(); } });
     return h('tr', { 'data-email': u.email },
+      h('td', { class: 'nickcell' }, nick),
       h('td', {}, h('span', { class: 'dot' + (online ? ' on' : '') }), u.email || u.id),
       h('td', {}, h('span', { class: 'badge' + (isPrem ? ' premium' : '') }, isPrem ? 'Premium' : 'Free')),
       h('td', {}, h('span', { class: 'badge' + (u.status === 'suspended' ? ' suspended' : '') }, u.status)),
       h('td', {}, fmt(u.last_seen_at)), h('td', {}, u.app_version || '—'),
-      h('td', {}, num(u.today)), h('td', {}, num(u.week)), h('td', {}, num(u.month)), h('td', {}, num(u.total)),
+      h('td', {}, num(u.today)), h('td', {}, num(u.week)), h('td', {}, num(u.month)), h('td', {}, num(u.total)), h('td', {}, num(u.tracker_searches)),
       h('td', {}, u.premium_expires_at ? fmtDay(u.premium_expires_at) : '—'),
       h('td', { class: 'actions' },
         h('button', { class: 'btn small gold', 'data-act': 'premium', onclick: () => premiumModal(u, reload) }, isPrem ? 'Extend / edit' : 'Activate Premium'),
         h('button', { class: 'btn small', 'data-act': 'pages', onclick: () => userPagesModal(u) }, 'Pages'),
         h('button', { class: 'btn small', 'data-act': 'suspend', onclick: () => suspendToggle(u, reload) }, u.status === 'suspended' ? 'Restore' : 'Suspend'),
-        h('button', { class: 'btn small', 'data-act': 'details', onclick: () => detailsModal(u) }, 'Details')));
+        h('button', { class: 'btn small', 'data-act': 'details', onclick: () => detailsModal(u) }, 'Details'),
+        u.is_admin ? null : h('button', { class: 'btn small danger', 'data-act': 'delete', onclick: () => deleteUserModal(u, reload) }, 'Delete user')));
+  }
+  // Delete user: typed-email confirmation; the SERVER re-checks admin rights, the email match, and refuses self/admin accounts.
+  function deleteUserModal(u, reload) {
+    const typed = h('input', { type: 'text', id: 'del-user-email', placeholder: 'Type the email to confirm', style: 'width:100%', autocomplete: 'off' });
+    modal('Delete user permanently', h('div', {},
+      h('p', {}, 'You are about to delete: ', h('b', {}, u.email || u.id), u.nickname ? ` (${u.nickname})` : ''),
+      h('p', { class: 'warn' }, 'This removes the account, its plan/subscription, usage history and Tracker search history. It cannot be undone. The person can sign in again later and gets a fresh Free account.'),
+      h('div', { class: 'field' }, h('label', {}, 'Type ', h('b', {}, u.email), ' to confirm'), typed)),
+    [{ label: 'Cancel', run: (c) => c() }, { label: 'Delete user', cls: 'danger', run: async (c) => {
+      if (typed.value.trim().toLowerCase() !== String(u.email || '').toLowerCase()) { toast('The email does not match — nothing was deleted', true); return true; }
+      try { await act(() => rpc('admin_delete_user', { p_user: u.id, p_confirm_email: typed.value.trim() }), 'User deleted'); }
+      catch (e) { return true; }
+      c(); reload();
+    } }]);
   }
   function suspendToggle(u, reload) {
     const to = u.status === 'suspended' ? 'active' : 'suspended';
@@ -381,6 +409,36 @@
       { label: 'Close', run: (c) => c() }]);
   }
 
+  // ------------------------------------------------------ API configuration
+  // Admin ON/OFF for the Meta Generator providers/models (rows exist only for switched-OFF items). Apify belongs to Adobe Tracker and is NOT here.
+  const AI_CATALOG = [["Gemini", [["Gemini 3.6 Flash", "gemini-3.6-flash"], ["Gemini 3.5 Flash", "gemini-3.5-flash"], ["Gemini 3.5 Flash-Lite", "gemini-3.5-flash-lite"], ["Gemini 3.1 Flash-Lite", "gemini-3.1-flash-lite"], ["Gemini 3 Flash (Preview)", "gemini-3-flash-preview"], ["Gemini 2.5 Flash", "gemini-2.5-flash"], ["Gemini 1.5 Flash", "gemini-1.5-flash"], ["Gemini 1.5 Pro", "gemini-1.5-pro"]]], ["Mistral", [["Pixtral 12B", "pixtral-12b-2409"], ["Pixtral Large", "pixtral-large-2411"]]], ["Groq", [["Qwen 3.6 27B (Vision)", "qwen/qwen3.6-27b"]]], ["Cerebras", [["Llama 3.3 70B", "llama-3.3-70b"], ["Llama 3.1 8B", "llama3.1-8b"]]], ["OpenAI", [["GPT-4o", "gpt-4o"], ["GPT-4o Mini", "gpt-4o-mini"], ["GPT-4.1 Nano", "gpt-4.1-nano"]]], ["OpenRouter", [["Inkling Small (Vision)", "thinkingmachines/inkling-small:free"], ["Ling 3.0 Flash VL", "inclusionai/ling-3.0-flash-vl:free"], ["Inkling (Vision)", "thinkingmachines/inkling:free"], ["Nemotron 3 Nano Omni", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"]]]];   // [provider, [[label, id], ...]] from backend/core/constants.py; the app matches on the ID
+  async function pageAi(main) {
+    const rowsOff = await rpc('admin_list_ai_access');
+    const off = new Set(rowsOff.filter((r) => !r.enabled).map((r) => r.provider + '\u0001' + r.model));
+    const draw = (list) => {
+      const offNow = new Set(list.filter((r) => !r.enabled).map((r) => r.provider + '\u0001' + r.model));
+      const known = new Map(AI_CATALOG.map(([p, m]) => [p, new Map(m.map(([l, i]) => [i, l]))]));
+      list.forEach((r) => { if (!known.has(r.provider)) known.set(r.provider, new Map()); if (r.model && !known.get(r.provider).has(r.model)) known.get(r.provider).set(r.model, r.model); });
+      const sw = (provider, model) => {
+        const on = !offNow.has(provider + '\u0001' + model);
+        return h('button', { class: 'btn small' + (on ? '' : ' danger'), 'data-ai': provider + '|' + model, onclick: async () => {
+          const apply = async () => { draw(await act(() => rpc('admin_set_ai_access', { p_provider: provider, p_model: model, p_enabled: !on }), `${model || provider} turned ${on ? 'off' : 'on'}`)); };
+          if (on && !model) confirmBox(`Turn off ${provider}?`, 'It disappears from Meta Generator for every user and is skipped during generation. Their keys are not touched.', 'Turn off', apply); else apply();
+        } }, on ? 'On' : 'Off');
+      };
+      const trs = [];
+      for (const [prov, models] of known) {
+        trs.push(h('tr', { class: 'prov', 'data-provider': prov }, h('td', {}, h('b', {}, prov)), h('td', {}, 'Provider'), h('td', {}, sw(prov, ''))));
+        for (const [m, label] of models) trs.push(h('tr', { 'data-provider': prov, 'data-model': m }, h('td', { style: 'padding-left:28px' }, label, ' ', h('code', {}, m)), h('td', {}, 'Model'),
+          h('td', {}, offNow.has(prov + '\u0001') ? h('span', { class: 'hint' }, 'Provider off') : sw(prov, m))));
+      }
+      main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'API Configuration — Meta Generator')),
+        h('p', { class: 'hint' }, 'Decide which Meta Generator providers and models users can use. The app applies this when it starts and on every heartbeat; a switched-off provider/model is hidden and skipped during generation. Adobe Tracker’s Apify keys are separate and not controlled here.'),
+        h('div', { class: 'tablewrap' }, h('table', { id: 'ai-rows' }, h('thead', {}, h('tr', {}, ['Provider / model', 'Level', 'Available'].map((x) => h('th', {}, x)))), h('tbody', {}, trs))));
+    };
+    draw(rowsOff);
+  }
+
   // ------------------------------------------------------------ app version
   async function pageVersion(main) {
     const list = await rpc('admin_list_versions');
@@ -396,7 +454,8 @@
         h('button', { class: 'btn small', 'data-act': 'edit', onclick: () => versionModal(v) }, 'Edit'),
         h('button', { class: 'btn small' + (v.is_active ? ' danger' : ''), 'data-act': 'toggle', onclick: async () => {
           await act(() => rpc('admin_set_version_active', { p_version: v.version, p_active: !v.is_active })); go('version');
-        } }, v.is_active ? 'Deactivate' : 'Activate')))));
+        } }, v.is_active ? 'Deactivate' : 'Activate'),
+        v.is_latest ? null : h('button', { class: 'btn small danger', 'data-act': 'delete', onclick: () => deleteVersionModal(v) }, 'Delete')))));
     main.replaceChildren(
       h('div', { class: 'toolbar' }, h('h2', {}, 'App version'),
         h('button', { class: 'btn primary', id: 'btn-new-version', onclick: () => versionModal(null) }, 'New version')),
@@ -405,6 +464,23 @@
       h('div', { class: 'tablewrap' }, h('table', {},
         h('thead', {}, h('tr', {}, ['Version', 'Status', 'Released', 'Update title', 'Actions'].map((x) => h('th', {}, x)))),
         rows)));
+  }
+  // Delete version: removes the version-control ROW only. The installer file at its download URL (Google Drive, GitHub, ...) is never touched.
+  // The server refuses the Latest version, and a version people still run needs an explicit second confirmation (they would be told to update).
+  function deleteVersionModal(v, force) {
+    modal(force ? 'Delete a version still in use?' : 'Delete version', h('div', {},
+      h('p', {}, 'Version: ', h('b', {}, v.version), v.download_url ? ' — ' + v.download_url : ''),
+      h('p', {}, force ? 'Some accounts are still running this version. Deleting it makes it unregistered, so those accounts will be asked to update.' : 'Only this version-control record is removed. The installer file at its download link is NOT deleted.')),
+    [{ label: 'Cancel', run: (c) => c() }, { label: force ? 'Delete anyway' : 'Delete version', cls: 'danger', run: async (c) => {
+      try { await act(() => rpc('admin_delete_version', { p_version: v.version, p_force: !!force }), 'Version deleted'); }
+      catch (e) {
+        c();
+        const m = /version_in_use:(\d+)/.exec(e.message || '');
+        if (m) { toast(`${m[1]} account(s) still run ${v.version}`, true); deleteVersionModal(v, true); }
+        return;
+      }
+      c(); go('version');
+    } }]);
   }
   function versionModal(v) {
     const version = h('input', { type: 'text', id: 'ver-version', placeholder: 'v0.9.9.3', value: v ? v.version : '', disabled: !!v });
@@ -418,7 +494,8 @@
     modal(v ? `Edit ${v.version}` : 'New version', h('div', {},
       h('div', { class: 'field' }, h('label', {}, 'Version'), version),
       h('div', { class: 'row' }, h('label', {}, active, ' Active'), h('label', {}, latest, ' Latest')),
-      h('div', { class: 'field' }, h('label', {}, 'Download URL'), url),
+      h('div', { class: 'field' }, h('label', {}, 'Download URL'), url,
+        h('p', { class: 'hint' }, 'Must be an https link to the installer .exe itself. Redirects are followed. Google Drive “Anyone with the link” share links and Dropbox share links are converted automatically. A web page (GitHub release page, a Drive folder, a landing page) opens in the user’s browser instead of updating in-app.')),
       h('div', { class: 'field' }, h('label', {}, 'Update title'), title),
       h('div', { class: 'field' }, h('label', {}, 'Features'), features),
       h('div', { class: 'field' }, h('label', {}, 'Bug fixes'), bugfixes),

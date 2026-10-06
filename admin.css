@@ -244,3 +244,9 @@ tr:last-child td { border-bottom:0; }
   .row label.name { width:auto; }
   .limit-chips { margin-left:0; }
 }
+
+/* v0.9.9.5.2: inline nickname editor in the Users table */
+input.nick { width:140px; min-width:100px; padding:4px 8px; background:transparent; border:1px solid transparent; border-radius:6px; color:inherit; font:inherit; }
+input.nick:hover { border-color:var(--line, rgba(255,255,255,.15)); }
+input.nick:focus { border-color:var(--accent); background:rgba(255,255,255,.04); outline:none; }
+input.nick::placeholder { color:var(--faint); }
