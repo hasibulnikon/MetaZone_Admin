@@ -24,11 +24,12 @@
       else if (k === 'value') e.value = v;
       else e.setAttribute(k, v === true ? '' : v);
     }
-    for (const kid of kids.flat()) if (kid != null && kid !== false) e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
     return e;
   }
   const fmt = (iso) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleString(); };
   const fmtDay = (iso) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); };
+  const fmtShort = (iso) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); };
   const num = (n) => (n == null ? '—' : Number(n).toLocaleString());
   function toast(msg, err) {
     const t = h('div', { class: 'toast' + (err ? ' err' : '') }, (err ? '⚠ ' : '✓ ') + msg);
@@ -64,13 +65,13 @@
 
   // ------------------------------------------------------------------ auth
   function screenSignIn(msg) {
-    app.replaceChildren(h('div', { class: 'center' }, h('div', { class: 'card gate', id: 'gate-signin' },
+    app.replaceChildren(h('div', { class: 'center' }, h('div', { class: 'card gate', id: 'gate-signin' }, logoImg('gate-logo', 'assets/logo/metazone-logo.png'),
       h('h1', {}, 'MetaZone Admin'), h('p', {}, 'Administrator sign-in. Only accounts on the admin list can enter.'),
       msg ? h('p', { class: 'warn' }, msg) : null,
       h('button', { class: 'btn primary', id: 'btn-google', onclick: signIn }, 'Sign in with Google'))));
   }
   function screenDenied(email) {
-    app.replaceChildren(h('div', { class: 'center' }, h('div', { class: 'card gate', id: 'gate-denied' },
+    app.replaceChildren(h('div', { class: 'center' }, h('div', { class: 'card gate', id: 'gate-denied' }, logoImg('gate-logo', 'assets/logo/metazone-logo.png'),
       h('h1', {}, 'Not an administrator'), h('p', {}, `${email || 'This account'} is not on the admin list. Nothing was loaded.`),
       h('button', { class: 'btn', onclick: signOut }, 'Sign out'))));
   }
@@ -91,13 +92,36 @@
   }
 
   // ----------------------------------------------------------------- shell
-  const TABS = [['overview', 'Overview'], ['users', 'Users'], ['limits', 'Limits & Offers'], ['pages', 'Pages'], ['ai', 'API Configuration'], ['payment', 'Premium payment info'],
-                ['notices', 'Notices'], ['version', 'App version']];
+  // v0.9.9.6: redesigned shell. Same tabs, same page functions; grouped nav with solid icons, real MetaZone logo.
+  const ADMIN_VERSION = '0.9.9.6';
+  const ICONS = {
+    overview: 'M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z',
+    users: 'M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z',
+    limits: 'M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z',
+    pages: 'M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-5 14H4v-4h11v4zm0-5H4V9h11v4zm5 5h-4V9h4v9z',
+    ai: 'M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8 5.8 21.3l2.4-7.4L2 9.4h7.6z',
+    payment: 'M20 4H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V6c0-1.11-.89-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z',
+    notices: 'M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z',
+    version: 'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z',
+  };
+  function icon(id) {
+    const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('aria-hidden', 'true');
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path'); p.setAttribute('d', ICONS[id] || ICONS.overview); s.append(p); return s;
+  }
+  const logoImg = (cls, src) => h('img', { class: cls || '', src: src || 'assets/logo/metazone-icon.png', alt: 'MetaZone', width: '64', height: '64' });
+  const NAV = [['Dashboard', [['overview', 'Overview'], ['users', 'Users']]],
+               ['Plans & access', [['limits', 'Limits & Offers'], ['pages', 'Pages'], ['ai', 'API Configuration']]],
+               ['Communication', [['payment', 'Premium payment info'], ['notices', 'Notices'], ['version', 'App version']]]];
+  const TABS = NAV.flatMap(([, items]) => items);
   function shell() {
-    const nav = h('div', { class: 'nav' }, TABS.map(([id, label]) => h('button', { 'data-tab': id, class: id === tab ? 'on' : '', onclick: () => go(id) }, label)));
+    const nav = h('div', { class: 'nav' }, NAV.map(([group, items]) => [h('div', { class: 'nav-group' }, group),
+      items.map(([id, label]) => h('button', { 'data-tab': id, title: label, class: id === tab ? 'on' : '', onclick: () => go(id) }, icon(id), h('span', {}, label)))]));
     app.replaceChildren(h('div', { class: 'shell' },
-      h('div', { class: 'side' }, h('div', { class: 'brand' }, 'Meta', h('span', {}, 'Zone'), ' Admin'), nav,
-        h('div', { class: 'who' }, adminEmail, h('button', { class: 'btn small', id: 'btn-signout', onclick: signOut }, 'Sign out'))),
+      h('div', { class: 'side' },
+        h('div', { class: 'brand' }, logoImg(), h('div', {}, h('b', {}, 'MetaZone'), h('small', {}, 'Admin'))),
+        nav,
+        h('div', { class: 'who' }, h('span', { class: 'email' }, adminEmail), h('span', { class: 'ver' }, 'Admin v' + ADMIN_VERSION),
+          h('button', { class: 'btn small', id: 'btn-signout', title: 'Sign out', onclick: signOut }, 'Sign out'))),
       h('div', { class: 'main', id: 'main' })));
     go(tab);
   }
@@ -110,48 +134,87 @@
   }
 
   // -------------------------------------------------------------- overview
+  // v0.9.9.6: hierarchy instead of four floating boxes -- KPI strip, then operational panels (generations / Tracker),
+  // then secondary panels (accounts / subscriptions / app versions). Every number comes from admin_overview +
+  // admin_tracker_search_stats; nothing is invented, and no time-series is drawn because the backend returns none.
   const stat = (n, l, cls) => h('div', { class: 'stat ' + (cls || '') }, h('div', { class: 'n' }, num(n)), h('div', { class: 'l' }, l));
+  const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
+  const miniStat = (n, l, cls) => h('div', { class: 'stat ' + (cls || '') }, h('div', { class: 'n' }, num(n)), h('div', { class: 'l' }, l));
+  const barRow = (label, value, of, cls, shown) => h('div', { class: 'bar ' + (cls || '') }, h('span', { class: 'bl', title: label }, label),
+    h('div', { class: 'bt' }, h('i', { style: `width:${Math.min(100, pct(value, of))}%` })), h('span', { class: 'bv' }, shown != null ? shown : num(value)));
+  const panel = (title, aside, ...kids) => h('div', { class: 'panel' }, h('div', { class: 'p-head' }, h('h3', {}, title), aside ? h('span', {}, aside) : null), ...kids);
   async function pageOverview(main) {
     const draw = async () => {
       const o = await rpc('admin_overview'); const ts = await rpc('admin_tracker_search_stats'); const u = o.users, g = o.generations, s = o.subscriptions, a = o.app;
+      const kpi = (n, l, sub, cls) => h('div', { class: 'stat ' + cls }, h('div', { class: 'n' }, num(n)), h('div', { class: 'l' }, l, sub ? [' · ', h('small', {}, sub)] : null));
+      const versions = Object.entries(a.users_by_version || {}).sort((x, y) => y[1] - x[1]);
+      const vTotal = versions.reduce((t, [, c]) => t + c, 0);
+      const plans = (u.free || 0) + (u.premium || 0);
       main.replaceChildren(
-        h('div', { class: 'toolbar' }, h('h2', {}, 'Overview'), h('button', { class: 'btn small', onclick: draw }, 'Refresh')),
-        h('h3', {}, 'Users'), h('div', { class: 'grid', id: 'stats-users' },
-          stat(u.total, 'Total users'), stat(u.active_now, 'Active now'), stat(u.active_today, 'Active today'), stat(u.free, 'Free users'),
-          stat(u.premium, 'Premium users', 'gold'), stat(u.expired_premium, 'Expired premium'), stat(u.suspended, 'Suspended')),
-        h('h3', {}, 'Generations'), h('div', { class: 'grid', id: 'stats-gen' },
-          stat(g.total, 'Total'), stat(g.today, 'Today'), stat(g.week, 'This week'), stat(g.month, 'This month'),
-          stat(g.free, 'Free plan'), stat(g.premium, 'Premium plan', 'gold'), stat(g.failed, 'Failed')),
-        h('h3', {}, 'Adobe Tracker searches'), h('div', { class: 'grid', id: 'stats-tracker' },
-          stat(ts.total, 'Total searches'), stat(ts.today, 'Today'), stat(ts.week, 'This week'), stat(ts.month, 'This month'), stat(ts.users_today, 'Users searching today')),
-        h('p', { class: 'hint' }, 'Searches started in Adobe Tracker only. Not generations, not Image-to-Prompt jobs, not Apify usage.'),
-        h('h3', {}, 'Subscriptions'), h('div', { class: 'grid', id: 'stats-subs' },
-          stat(s.active_premium, 'Active premium', 'gold'), stat(s.expiring_soon, 'Expiring in 7 days'), stat(s.expired, 'Expired'), stat(s.recently_activated, 'Activated (7 days)')),
-        h('h3', {}, 'Application'),
-        h('p', {}, 'Latest version: ', h('b', {}, a.latest_version || 'not set')),
-        h('div', { class: 'tablewrap' }, h('table', { style: 'min-width:0' }, h('tr', {}, h('th', {}, 'Version in use'), h('th', {}, 'Users')),
-          ...Object.entries(a.users_by_version || {}).sort((x, y) => y[1] - x[1]).map(([v, c]) => h('tr', {}, h('td', {}, v), h('td', {}, num(c)))))));
+        h('div', { class: 'toolbar' }, h('h2', {}, 'Overview'), h('button', { class: 'btn small', id: 'btn-refresh', onclick: draw }, 'Refresh')),
+        h('div', { class: 'kpis', id: 'stats-users' },
+          kpi(u.total, 'Total users', `${num(u.active_today)} active today`, 'accent'),
+          kpi(u.active_now, 'Active now', null, 'ok'),
+          kpi(u.free, 'Free / Demo', `${pct(u.free, plans)}%`, ''),
+          kpi(u.premium, 'Premium', `${pct(u.premium, plans)}%`, 'gold')),
+        h('div', { class: 'ov-cols' },
+          panel('Generations', 'AI metadata / prompt batches', h('div', { id: 'stats-gen' },
+            h('div', { class: 'mini' }, miniStat(g.total, 'Total'), miniStat(g.today, 'Today'), miniStat(g.week, 'This week'), miniStat(g.month, 'This month')),
+            h('div', { class: 'bars' }, barRow('Today', g.today, g.month, '', num(g.today)), barRow('This week', g.week, g.month, '', num(g.week)), barRow('This month', g.month, g.month, '', num(g.month))),
+            h('div', { style: 'height:14px' }),
+            h('div', { class: 'split', title: 'Share of all-time generations by plan' }, h('i', { class: 'a', style: `width:${pct(g.free, g.total)}%` }), h('i', { class: 'b', style: `width:${pct(g.premium, g.total)}%` })),
+            h('div', { class: 'legend' }, h('span', {}, h('i', { style: 'background:var(--accent)' }), `Free ${num(g.free)}`), h('span', {}, h('i', { style: 'background:var(--warning)' }), `Premium ${num(g.premium)}`),
+              h('span', { class: g.failed ? 'warn' : '' }, h('i', { style: 'background:var(--error)' }), `Failed ${num(g.failed)} (${pct(g.failed, g.total)}%)`)))),
+          panel('Adobe Tracker searches', 'searches started in Tracker only', h('div', { id: 'stats-tracker' },
+            h('div', { class: 'mini' }, miniStat(ts.total, 'Total searches'), miniStat(ts.today, 'Today'), miniStat(ts.week, 'This week'), miniStat(ts.month, 'This month')),
+            h('div', { class: 'bars' }, barRow('Today', ts.today, ts.month, '', num(ts.today)), barRow('This week', ts.week, ts.month, '', num(ts.week)), barRow('This month', ts.month, ts.month, '', num(ts.month))),
+            h('div', { style: 'height:12px' }),
+            h('p', { class: 'hint', style: 'margin:0' }, `${num(ts.users_today)} user(s) searched today. Not generations, not Image-to-Prompt jobs, not Apify usage.`)))),
+        h('div', { class: 'ov-cols three' },
+          panel('Accounts', null, h('div', { class: 'mini' }, miniStat(u.active_today, 'Active today'), miniStat(u.expired_premium, 'Expired premium'), miniStat(u.suspended, 'Suspended'))),
+          panel('Subscriptions', null, h('div', { id: 'stats-subs' }, h('div', { class: 'mini' },
+            miniStat(s.active_premium, 'Active premium'), miniStat(s.expiring_soon, 'Expiring in 7 days'), miniStat(s.expired, 'Expired'), miniStat(s.recently_activated, 'Activated (7 days)')))),
+          panel('Application', `Latest: ${a.latest_version || 'not set'}`, versions.length
+            ? h('div', { class: 'bars', id: 'stats-versions' }, versions.slice(0, 8).map(([v, c]) => barRow(v, c, vTotal, v === a.latest_version ? 'ok' : '', `${num(c)}`)))
+            : h('p', { class: 'hint', style: 'margin:0' }, 'No version data yet.'))));
     };
     await draw(); refreshTimer = setInterval(() => { if (tab === 'overview') draw().catch(() => {}); }, 60000);
   }
 
   // ----------------------------------------------------------------- users
+  // v0.9.9.6: compact table -- one "User" cell (editable nickname over the email), badges grouped, usage as one block, a
+  // single Actions cell. All data columns and every action from before are kept; filters are client-side over loaded rows.
   const PAGE = 50;
   async function pageUsers(main) {
-    let offset = 0; let search = ''; const rows = h('tbody', { id: 'user-rows' }); const more = h('button', { class: 'btn', id: 'btn-more', onclick: () => load(true) }, 'Load more');
-    const box = h('input', { type: 'search', id: 'user-search', placeholder: 'Search by email or nickname…', style: 'width:280px' });
+    let offset = 0; let search = ''; let fPlan = ''; let fStatus = ''; let loaded = 0;
+    const rows = h('tbody', { id: 'user-rows' }); const more = h('button', { class: 'btn', id: 'btn-more', onclick: () => load(true) }, 'Load more');
+    const note = h('div', { class: 'count-note', id: 'user-count' });
+    const box = h('input', { type: 'search', id: 'user-search', placeholder: 'Search by email or nickname…', style: 'width:260px' });
     let t; box.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { search = box.value.trim(); load(false); }, 250); });
+    const applyFilters = () => {
+      let shown = 0;
+      for (const tr of rows.children) { const ok = (!fPlan || tr.dataset.plan === fPlan) && (!fStatus || tr.dataset.status === fStatus); tr.hidden = !ok; if (ok) shown++; }
+      note.textContent = loaded ? `Showing ${shown} of ${loaded} loaded user${loaded === 1 ? '' : 's'}${more.hidden ? '' : ' (more available)'}` : '';
+    };
+    const seg = (label, opts, set) => {
+      const el = h('span', { class: 'seg', role: 'group', 'aria-label': label }, opts.map(([v, l]) => h('button', { type: 'button', 'data-v': v, class: v === '' ? 'on' : '', onclick: () => {
+        set(v); el.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); applyFilters(); } }, l)));
+      return el;
+    };
     const cfgNow = await rpc('admin_get_config');
     const threshold = Number(cfgNow.online_threshold_seconds || 600);
-    main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'Users'), box, h('button', { class: 'btn small', onclick: () => load(false) }, 'Refresh')),
-      h('div', { class: 'tablewrap' }, h('table', {}, h('thead', {}, h('tr', {},
-        ['Nickname', 'Email', 'Plan', 'Status', 'Last seen', 'Version', 'Today', 'Week', 'Month', 'Total', 'Tracker searches', 'Premium expires', 'Actions'].map((c) => h('th', {}, c)))), rows)),
-      h('p', {}, more));
+    main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'Users'), box,
+        h('div', { class: 'filters' }, seg('Plan', [['', 'All'], ['free', 'Free'], ['premium', 'Premium']], (v) => { fPlan = v; }),
+          seg('Status', [['', 'Any status'], ['active', 'Active'], ['suspended', 'Suspended']], (v) => { fStatus = v; })),
+        h('button', { class: 'btn small', onclick: () => load(false) }, 'Refresh')),
+      h('div', { class: 'tablewrap' }, h('table', { id: 'users-table' }, h('thead', {}, h('tr', {},
+        ['Nickname', 'Email', 'Plan', 'Usage', 'Tracker', 'Last seen', 'Actions'].map((c) => h('th', {}, c)))), rows)),
+      note, h('p', { style: 'margin-top:10px' }, more));
     async function load(append) {
-      if (!append) { offset = 0; rows.replaceChildren(); }
+      if (!append) { offset = 0; loaded = 0; rows.replaceChildren(); }
       const list = await act(() => rpc('admin_list_users', { p_search: search || null, p_limit: PAGE, p_offset: offset }));
       for (const u of list) rows.append(userRow(u, threshold, () => load(false)));
-      offset += list.length; more.hidden = list.length < PAGE;
+      offset += list.length; loaded += list.length; more.hidden = list.length < PAGE; applyFilters();
     }
     await load(false);
   }
@@ -167,20 +230,23 @@
     };
     nick.addEventListener('change', saveNick);
     nick.addEventListener('keydown', (e) => { if (e.key === 'Enter') nick.blur(); if (e.key === 'Escape') { nick.value = last; nick.blur(); } });
-    return h('tr', { 'data-email': u.email },
-      h('td', { class: 'nickcell' }, nick),
-      h('td', {}, h('span', { class: 'dot' + (online ? ' on' : '') }), u.email || u.id),
-      h('td', {}, h('span', { class: 'badge' + (isPrem ? ' premium' : '') }, isPrem ? 'Premium' : 'Free')),
-      h('td', {}, h('span', { class: 'badge' + (u.status === 'suspended' ? ' suspended' : '') }, u.status)),
-      h('td', {}, fmt(u.last_seen_at)), h('td', {}, u.app_version || '—'),
-      h('td', {}, num(u.today)), h('td', {}, num(u.week)), h('td', {}, num(u.month)), h('td', {}, num(u.total)), h('td', {}, num(u.tracker_searches)),
-      h('td', {}, u.premium_expires_at ? fmtDay(u.premium_expires_at) : '—'),
-      h('td', { class: 'actions' },
-        h('button', { class: 'btn small gold', 'data-act': 'premium', onclick: () => premiumModal(u, reload) }, isPrem ? 'Extend / edit' : 'Activate Premium'),
+    const us = (label, v) => h('div', {}, h('span', {}, label), h('b', {}, num(v)));
+    return h('tr', { 'data-email': u.email, 'data-plan': isPrem ? 'premium' : 'free', 'data-status': u.status },
+      h('td', { class: 'nickcell c-nick' }, nick),
+      h('td', { class: 'c-email' }, h('div', { class: 'uemail', title: u.email || u.id }, h('span', { class: 'dot' + (online ? ' on' : ''), title: online ? 'Online now' : 'Offline' }), u.email || u.id)),
+      h('td', { class: 'c-plan' }, h('div', { class: 'badges' },
+        h('span', { class: 'badge' + (isPrem ? ' premium' : '') }, isPrem ? 'Premium' : 'Free'),
+        h('span', { class: 'badge' + (u.status === 'suspended' ? ' suspended' : '') }, u.status)),
+        isPrem && u.premium_expires_at ? h('div', { class: 'meta2' }, h('small', {}, 'Expires ' + fmtDay(u.premium_expires_at))) : null),
+      h('td', { class: 'c-usage' }, h('div', { class: 'usage' }, us('Today', u.today), us('Week', u.week), us('Month', u.month), us('Total', u.total))),
+      h('td', { class: 'c-tracker' }, h('div', { class: 'meta2' }, num(u.tracker_searches), h('small', {}, 'searches'))),
+      h('td', { class: 'c-seen' }, h('div', { class: 'meta2' }, fmtShort(u.last_seen_at), h('small', {}, u.app_version || '—'))),
+      h('td', { class: 'actions c-act' }, h('div', { class: 'uact' },
+        h('button', { class: 'btn small gold', 'data-act': 'premium', onclick: () => premiumModal(u, reload) }, isPrem ? 'Extend / edit' : 'Activate'),
         h('button', { class: 'btn small', 'data-act': 'pages', onclick: () => userPagesModal(u) }, 'Pages'),
         h('button', { class: 'btn small', 'data-act': 'suspend', onclick: () => suspendToggle(u, reload) }, u.status === 'suspended' ? 'Restore' : 'Suspend'),
         h('button', { class: 'btn small', 'data-act': 'details', onclick: () => detailsModal(u) }, 'Details'),
-        u.is_admin ? null : h('button', { class: 'btn small danger', 'data-act': 'delete', onclick: () => deleteUserModal(u, reload) }, 'Delete user')));
+        u.is_admin ? null : h('button', { class: 'btn small danger', 'data-act': 'delete', onclick: () => deleteUserModal(u, reload) }, 'Delete'))));
   }
   // Delete user: typed-email confirmation; the SERVER re-checks admin rights, the email match, and refuses self/admin accounts.
   function deleteUserModal(u, reload) {
@@ -486,7 +552,7 @@
     const version = h('input', { type: 'text', id: 'ver-version', placeholder: 'v0.9.9.3', value: v ? v.version : '', disabled: !!v });
     const active = h('input', { type: 'checkbox', id: 'ver-active' }); active.checked = v ? v.is_active : true;
     const latest = h('input', { type: 'checkbox', id: 'ver-latest' }); latest.checked = v ? v.is_latest : false;
-    const url = h('input', { type: 'url', id: 'ver-url', placeholder: 'https://…/MetaZone_Setup_0.9.9.5.exe  (direct installer link = in-app update)', value: v ? (v.download_url || '') : '' });
+    const url = h('input', { type: 'url', id: 'ver-url', placeholder: 'https://…/MetaZone_Setup_0.9.9.6.exe  (direct installer link = in-app update)', value: v ? (v.download_url || '') : '' });
     const title = h('input', { type: 'text', id: 'ver-title', placeholder: 'What is new (short)', value: v ? (v.update_title || '') : '' });
     const features = h('textarea', { id: 'ver-features', placeholder: 'New features (one per line)' }, v ? (v.features || '') : '');
     const bugfixes = h('textarea', { id: 'ver-bugfixes', placeholder: 'Bug fixes (one per line)' }, v ? (v.bugfixes || '') : '');

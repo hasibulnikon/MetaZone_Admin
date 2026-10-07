@@ -1,4 +1,4 @@
-# MetaZone Admin  (v0.9.9.5)
+# MetaZone Admin  (v0.9.9.6)
 
 Your control panel: users, Premium activation, **limits & offers per plan**, unlimited-Free bonus, payment info,
 notices, app version. A static site (no server of its own): it talks to your Supabase project, and **every
@@ -37,3 +37,6 @@ Apps see changed limits on their next refresh (heartbeat, a few minutes) and alw
 Admin → App version → **Download URL** should be a **direct https link to the installer `.exe`** (for example a GitHub
 release asset). The app then downloads it inside its own window (progress + speed) and installs it with the same Inno
 installer as before. If the link is a web page instead, the app notices and opens it in the browser, as in earlier versions.
+
+## Look & feel (v0.9.9.6)
+Dark, compact, one shared design system: every colour/spacing/radius is a variable at the top of `admin.css` (`:root`), and every page uses the same components (buttons, inputs, badges, tables, panels, nav, modal). Branding lives in `assets/` (`assets/README.md` lists the files to replace). This release changed presentation only: no SQL migration, no change to what any admin action does.
