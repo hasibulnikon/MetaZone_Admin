@@ -94,6 +94,7 @@
   // ----------------------------------------------------------------- shell
   // v0.9.9.6: redesigned shell. Same tabs, same page functions; grouped nav with solid icons, real MetaZone logo.
   const ADMIN_VERSION = '0.9.9.6';
+  let closeMenu = () => {};
   const ICONS = {
     overview: 'M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z',
     users: 'M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z',
@@ -103,6 +104,7 @@
     payment: 'M20 4H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V6c0-1.11-.89-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z',
     notices: 'M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z',
     version: 'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z',
+    menu: 'M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z',
   };
   function icon(id) {
     const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('aria-hidden', 'true');
@@ -116,17 +118,26 @@
   function shell() {
     const nav = h('div', { class: 'nav' }, NAV.map(([group, items]) => [h('div', { class: 'nav-group' }, group),
       items.map(([id, label]) => h('button', { 'data-tab': id, title: label, class: id === tab ? 'on' : '', onclick: () => go(id) }, icon(id), h('span', {}, label)))]));
-    app.replaceChildren(h('div', { class: 'shell' },
+    const shellEl = h('div', { class: 'shell' });
+    const setMenu = (open) => { shellEl.classList.toggle('menu-open', open); const b = document.getElementById('btn-menu'); if (b) b.setAttribute('aria-expanded', String(open)); };
+    closeMenu = () => setMenu(false);
+    const topbar = h('div', { class: 'topbar' },
+      h('button', { class: 'menu-btn', id: 'btn-menu', type: 'button', 'aria-label': 'Open menu', 'aria-expanded': 'false', onclick: () => setMenu(!shellEl.classList.contains('menu-open')) }, icon('menu')),
+      logoImg('tb-logo'), h('b', { id: 'topbar-title' }, ''));
+    shellEl.append(topbar, h('div', { class: 'scrim', onclick: closeMenu }),
       h('div', { class: 'side' },
         h('div', { class: 'brand' }, logoImg(), h('div', {}, h('b', {}, 'MetaZone'), h('small', {}, 'Admin'))),
         nav,
         h('div', { class: 'who' }, h('span', { class: 'email' }, adminEmail), h('span', { class: 'ver' }, 'Admin v' + ADMIN_VERSION),
           h('button', { class: 'btn small', id: 'btn-signout', title: 'Sign out', onclick: signOut }, 'Sign out'))),
-      h('div', { class: 'main', id: 'main' })));
+      h('div', { class: 'main', id: 'main' }));
+    app.replaceChildren(shellEl);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
     go(tab);
   }
   function go(id) {
-    tab = id; clearInterval(refreshTimer);
+    tab = id; clearInterval(refreshTimer); closeMenu();
+    const tt = document.getElementById('topbar-title'); if (tt) tt.textContent = (TABS.find(([i]) => i === id) || [, ''])[1];
     document.querySelectorAll('.nav button').forEach((b) => b.classList.toggle('on', b.dataset.tab === id));
     const main = document.getElementById('main'); main.replaceChildren(h('div', { class: 'skel' }, h('span', { class: 'spin' }), 'Loading…'));
     const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, ai: pageAi, payment: pagePayment, notices: pageNotices, version: pageVersion }[id];
@@ -579,6 +590,17 @@
       c(); go('version');
     } }]);
   }
+
+  // Phone layout: below 760px tables become cards (admin.css). Each cell needs its column title as data-label for that.
+  function labelTables() {
+    document.querySelectorAll('table').forEach((t) => {
+      if (t.id === 'users-table') return;                    // the Users table has its own stacked layout
+      const heads = [...t.querySelectorAll('th')].slice(0, 12).map((x) => x.textContent.trim());
+      if (!heads.length) return;
+      t.querySelectorAll('tr').forEach((tr) => [...tr.children].forEach((c, i) => { if (c.tagName === 'TD' && !c.dataset.label && heads[i]) c.dataset.label = heads[i]; }));
+    });
+  }
+  new MutationObserver(labelTables).observe(document.body, { childList: true, subtree: true });
 
   // --------------------------------------------------------------- start
   sb.auth.onAuthStateChange((event) => { if (event === 'SIGNED_OUT') screenSignIn(); });
