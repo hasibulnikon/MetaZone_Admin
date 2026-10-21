@@ -4,6 +4,7 @@
 (() => {
   'use strict';
   const cfg = window.MZ_ADMIN_CONFIG || {};
+  const ADDON = window.MZ_ADDON;                           // pure release logic (addon_logic.js)
   const sb = window.supabase.createClient(cfg.supabaseUrl, cfg.publishableKey, {
     auth: { flowType: 'pkce', persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
   });
@@ -93,7 +94,7 @@
 
   // ----------------------------------------------------------------- shell
   // v0.9.9.6: redesigned shell. Same tabs, same page functions; grouped nav with solid icons, real MetaZone logo.
-  const ADMIN_VERSION = '0.9.9.6';
+  const ADMIN_VERSION = '1.0.0';
   let closeMenu = () => {};
   const ICONS = {
     overview: 'M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z',
@@ -104,6 +105,7 @@
     payment: 'M20 4H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V6c0-1.11-.89-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z',
     notices: 'M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z',
     version: 'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z',
+    addons: 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z',
     menu: 'M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z',
   };
   function icon(id) {
@@ -112,7 +114,7 @@
   }
   const logoImg = (cls, src) => h('img', { class: cls || '', src: src || 'assets/logo/metazone-icon.png', alt: 'MetaZone', width: '64', height: '64' });
   const NAV = [['Dashboard', [['overview', 'Overview'], ['users', 'Users']]],
-               ['Plans & access', [['limits', 'Limits & Offers'], ['pages', 'Pages'], ['ai', 'API Configuration']]],
+               ['Plans & access', [['limits', 'Limits & Offers'], ['pages', 'Pages'], ['addons', 'Add-ons'], ['ai', 'API Configuration']]],
                ['Communication', [['payment', 'Premium payment info'], ['notices', 'Notices'], ['version', 'App version']]]];
   const TABS = NAV.flatMap(([, items]) => items);
   function shell() {
@@ -139,8 +141,13 @@
     tab = id; clearInterval(refreshTimer); closeMenu();
     const tt = document.getElementById('topbar-title'); if (tt) tt.textContent = (TABS.find(([i]) => i === id) || [, ''])[1];
     document.querySelectorAll('.nav button').forEach((b) => b.classList.toggle('on', b.dataset.tab === id));
-    const main = document.getElementById('main'); main.replaceChildren(h('div', { class: 'skel' }, h('span', { class: 'spin' }), 'Loading…'));
-    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, ai: pageAi, payment: pagePayment, notices: pageNotices, version: pageVersion }[id];
+    // v0.9.9.10 (Task 3 Phase A): every navigation renders into its OWN fresh #main element and swaps it in. A slower, earlier
+    // load keeps a reference to its old (now detached) element, so when it finishes it can only write there -- never into the
+    // tab the admin has since moved to. (Previously all loads shared one #main, so the last one to FINISH won, not the last clicked.)
+    const old = document.getElementById('main');
+    const main = h('div', { class: 'main', id: 'main' }, h('div', { class: 'skel' }, h('span', { class: 'spin' }), 'Loading…'));
+    old.replaceWith(main);
+    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, addons: pageAddons, ai: pageAi, payment: pagePayment, notices: pageNotices, version: pageVersion }[id];
     page(main).catch((e) => main.replaceChildren(h('p', { class: 'warn' }, 'Error: ' + e.message)));
   }
 
@@ -189,7 +196,9 @@
             ? h('div', { class: 'bars', id: 'stats-versions' }, versions.slice(0, 8).map(([v, c]) => barRow(v, c, vTotal, v === a.latest_version ? 'ok' : '', `${num(c)}`)))
             : h('p', { class: 'hint', style: 'margin:0' }, 'No version data yet.'))));
     };
-    await draw(); refreshTimer = setInterval(() => { if (tab === 'overview') draw().catch(() => {}); }, 60000);
+    await draw();
+    if (!main.isConnected) return;                           // superseded by a newer navigation while loading: do not start a refresh timer
+    refreshTimer = setInterval(() => { if (tab === 'overview') draw().catch(() => {}); }, 60000);
   }
 
   // ----------------------------------------------------------------- users
@@ -442,48 +451,236 @@
   // refuses their generation batches.
   async function pagePages(main) {
     const list = await rpc('admin_list_pages');
-    const rows = h('tbody', { id: 'page-rows' }, list.map((p) => h('tr', { 'data-page': p.page_key },
-      h('td', {}, p.label), h('td', {}, h('code', {}, p.page_key)),
-      h('td', {}, h('span', { class: 'dot' + (p.enabled ? ' on' : '') }), p.locked ? 'Always on' : (p.enabled ? 'On for everyone' : 'Off for everyone')),
+    // v0.9.9.9: every page has a Free switch and a Premium switch (migration 0011). A page reaches a user when the "Everyone" master
+    // switch is on AND the switch for the user's plan is on -- unless you forced it on/off for that one account (Users -> Pages), which wins.
+    const planBtn = (p, plan) => {
+      const key = plan === 'free' ? 'enabled_free' : 'enabled_premium', on = p[key] !== false;
+      if (p.locked || p.protected || ADDON.isProtectedPage(p.page_key)) return 'Always on';
+      return h('button', { class: 'btn small' + (on ? '' : ' danger'), 'data-act': 'plan-' + plan, title: `${on ? 'Switch off' : 'Switch on'} for ${plan} accounts`, onclick: async () => {
+        const go2 = async () => { await act(() => rpc('admin_set_page_plan_access', { p_key: p.page_key, p_free: plan === 'free' ? !on : null, p_premium: plan === 'premium' ? !on : null }), `${p.label}: ${plan} ${on ? 'off' : 'on'}`); go('pages'); };
+        if (on) confirmBox(`Switch ${p.label} off for ${plan} users?`, `Every ${plan} account loses it, except accounts you have forced it ON for (Users → Pages). Their data is not touched.`, 'Switch off', go2); else go2();
+      } }, h('span', { class: 'dot' + (on ? ' on' : '') }), on ? 'On' : 'Off');
+    };
+    const hints = { tracker: 'Also controls the Adobe Tracker add-on.' };
+    const pageRow = (p) => h('tr', { 'data-page': p.page_key },
+      h('td', {}, p.label, hints[p.page_key] ? h('div', { class: 'hint', 'data-hint': p.page_key }, hints[p.page_key]) : null), h('td', {}, h('code', {}, p.page_key)),
+      h('td', { 'data-col': 'free' }, planBtn(p, 'free')),
+      h('td', { 'data-col': 'premium' }, planBtn(p, 'premium')),
+      h('td', {}, h('span', { class: 'dot' + (p.enabled || p.locked ? ' on' : '') }), p.locked || p.protected ? 'Always on (protected)' : (p.enabled ? 'On' : 'Off for everyone')),
       h('td', {}, p.overrides_on || p.overrides_off
         ? [p.overrides_on ? h('span', { class: 'badge', style: 'margin-right:6px' }, `${p.overrides_on} forced on`) : null,
            p.overrides_off ? h('span', { class: 'badge suspended' }, `${p.overrides_off} forced off`) : null]
         : '—'),
-      h('td', { class: 'actions' }, p.locked ? '—' :
+      h('td', { 'data-col': 'changed', class: 'hint' }, p.updated_at ? [fmtShort(p.updated_at), p.updated_by_email ? h('div', {}, p.updated_by_email) : null] : '—'),
+      h('td', { class: 'actions' }, p.locked || p.protected ? '—' :
         h('button', { class: 'btn small' + (p.enabled ? ' danger' : ''), 'data-act': 'toggle', onclick: async () => {
           const go2 = async () => { await act(() => rpc('admin_set_page_enabled', { p_key: p.page_key, p_enabled: !p.enabled }), `${p.label} turned ${p.enabled ? 'off' : 'on'}`); go('pages'); };
-          if (p.enabled) confirmBox(`Turn off ${p.label}?`, 'It disappears for every user, except accounts you have forced it ON for. Their data is not touched.', 'Turn off', go2); else go2();
-        } }, p.enabled ? 'Turn off' : 'Turn on')))));
+          if (p.enabled) confirmBox(`Turn off ${p.label} for everyone?`, 'It disappears for every user, whatever their plan - including accounts you forced it ON for. Their data is not touched.', 'Turn off', go2); else go2();
+        } }, p.enabled ? 'Turn off for everyone' : 'Turn on')));
+    const table = (id, items) => h('div', { class: 'tablewrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Page', 'Key', 'Free plan', 'Premium plan', 'Everyone', 'Per-user exceptions', 'Last changed', 'Actions'].map((x) => h('th', {}, x)))),
+      h('tbody', { id }, items.map(pageRow))));
+    const groups = ADDON.groupPages(list);                   // v0.9.9.10 (0012): 'Pages' and 'Add-on features'; 'settings' is never shown
     main.replaceChildren(
       h('div', { class: 'toolbar' }, h('h2', {}, 'Pages')),
-      h('p', { class: 'hint' }, 'The global switch decides whether a page exists for everybody. To sell a smaller plan, leave the page on here and switch it off for that one customer (Users → Pages); to beta-test a new page, switch it off here and force it on for your own account. Home and Settings can never be switched off. Users see the change within a few minutes (next heartbeat), or right away on their next generation attempt.'),
-      h('div', { class: 'tablewrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, ['Page', 'Key', 'Global', 'Per-user exceptions', 'Actions'].map((x) => h('th', {}, x)))), rows)));
+      h('p', { class: 'hint' }, 'Choose which plan gets each page: the Free and Premium switches are independent (for example Tracker: Free off, Premium on). The “Everyone” switch is a master switch: when it is OFF the page is gone for ALL accounts, even ones you forced it on for. While it is ON, you can give or take a page for ONE account whatever its plan (Users → Pages): that exception beats the Free/Premium switches. Home and Settings can never be switched off (protected). Users see the change within a few minutes (next heartbeat), or right away on their next generation attempt.'),
+      h('h3', { id: 'grp-pages' }, 'Pages'), table('page-rows', groups.pages),
+      h('h3', { id: 'grp-addons', style: 'margin-top:22px' }, 'Add-on features'),
+      h('p', { class: 'hint' }, 'These control who can download and use each add-on. Free users still see locked add-ons in the app, with Download disabled.'),
+      table('addon-rows', groups.addons),
+      h('h3', { id: 'grp-audit', style: 'margin-top:22px' }, 'Recent changes'),
+      h('p', { class: 'hint' }, 'The last page and add-on-version changes: who, what, when.'),
+      h('div', { id: 'control-audit' }, h('p', { class: 'hint' }, 'Loading…')));
+    loadAudit(main.querySelector('#control-audit'));         // this navigation's own box (a global lookup could hit a newer Pages screen)
+  }
+  async function loadAudit(box) {
+    if (!box) return;
+    try {
+      const rowsA = await rpc('admin_list_control_audit', { p_limit: 30 });
+      box.replaceChildren(rowsA.length ? h('ul', { class: 'checks' }, rowsA.map((a) => h('li', {}, h('span', { class: 'hint' }, fmtShort(a.at) + ' '), ADDON.auditLine(a)))) : h('p', { class: 'hint' }, 'No changes recorded yet.'));
+    } catch (e) { box.replaceChildren(h('p', { class: 'hint' }, 'Could not load recent changes (apply migration 0013).')); }
   }
   async function userPagesModal(u) {
     const body = h('div', { id: 'user-pages' });
-    const render = (list) => body.replaceChildren(
-      h('p', { class: 'hint' }, 'Force a page on or off for just this account. “Follow global” removes the exception.'),
-      h('div', { class: 'tablewrap' }, h('table', { style: 'min-width:0' },
-        h('thead', {}, h('tr', {}, ['Page', 'Global', 'This user', 'Result'].map((x) => h('th', {}, x)))),
-        h('tbody', {}, list.map((p) => {
-          const sel = h('select', { 'data-page': p.page_key, disabled: p.locked },
-            [['', 'Follow global'], ['on', 'Force on'], ['off', 'Force off']].map(([v, l]) => h('option', { value: v }, l)));
-          sel.value = p.override === true ? 'on' : p.override === false ? 'off' : '';
-          sel.addEventListener('change', async () => {
-            try {
-              render(await act(() => rpc('admin_set_user_page', { p_user: u.id, p_key: p.page_key, p_enabled: sel.value === '' ? null : sel.value === 'on' }), `${p.label} updated`));
-            } catch (e) { /* act() already toasted */ }
-          });
-          return h('tr', { 'data-page': p.page_key }, h('td', {}, p.label),
-            h('td', {}, p.locked ? 'Always on' : (p.global_enabled ? 'On' : 'Off')),
-            h('td', {}, p.locked ? '—' : sel),
-            h('td', {}, h('span', { class: 'badge' + (p.effective ? '' : ' suspended') }, p.effective ? 'Enabled' : 'Disabled')));
-        })))));
+    const rowFor = (p) => {
+      const prot = p.locked || p.protected || ADDON.isProtectedPage(p.page_key);
+      const sel = h('select', { 'data-page': p.page_key, disabled: prot },
+        [['', 'Follow plan'], ['on', 'Force on'], ['off', 'Force off']].map(([v, l]) => h('option', { value: v }, l)));
+      sel.value = p.override === true ? 'on' : p.override === false ? 'off' : '';
+      sel.addEventListener('change', async () => {
+        try {
+          render(await act(() => rpc('admin_set_user_page', { p_user: u.id, p_key: p.page_key, p_enabled: sel.value === '' ? null : sel.value === 'on' }), `${p.label} updated`));
+        } catch (e) { /* act() already toasted */ }
+      });
+      return h('tr', { 'data-page': p.page_key }, h('td', {}, p.label),
+        h('td', {}, prot ? 'Always on (protected)' : p.global_enabled === false ? 'Off for everyone' : (p.plan_enabled === undefined ? (p.global_enabled ? 'On' : 'Off') : (p.plan_enabled ? 'On' : 'Off') + ' (' + p.plan + ')')),
+        h('td', {}, prot ? '—' : sel, !prot && p.global_enabled === false ? h('div', { class: 'hint', 'data-hint': 'global-off' }, 'Off for everyone: this setting has no effect until the page is turned back on.') : null),
+        h('td', {}, h('span', { class: 'badge' + (p.effective ? '' : ' suspended') }, p.effective ? 'Enabled' : 'Disabled')));
+    };
+    const tbl = (items) => h('div', { class: 'tablewrap' }, h('table', { style: 'min-width:0' },
+      h('thead', {}, h('tr', {}, ['Page', 'Their plan gives', 'This user', 'Result'].map((x) => h('th', {}, x)))), h('tbody', {}, items.map(rowFor))));
+    const render = (list) => { const g = ADDON.groupPages(list); body.replaceChildren(
+      h('p', { class: 'hint' }, 'Force a page on or off for just this account, whatever its plan. “Follow plan” removes the exception and the page follows the Free/Premium switches again. A page that is OFF for everyone stays off whatever is set here.'),
+      h('h3', {}, 'Pages'), tbl(g.pages),
+      g.addons.length ? h('div', {}, h('h3', { style: 'margin-top:16px' }, 'Add-on features'),
+        h('p', { class: 'hint' }, 'Who can download and use each add-on. Free users still see locked add-ons in the app.'), tbl(g.addons)) : null); };
     render(await act(() => rpc('admin_get_user_pages', { p_user: u.id })));
     modal(`Pages — ${u.email}`, body, [
       { label: 'Reset all to global', run: async () => { render(await act(() => rpc('admin_reset_user_pages', { p_user: u.id }), 'Reset to global')); return true; } },
       { label: 'Close', run: (c) => c() }]);
+  }
+
+  // ----------------------------------------------------------------- add-ons
+  // v0.9.9.10 (0012): signed add-on packages (.mzaddon) live in the PRIVATE Storage bucket 'addons'. Publishing = (1) check the package against its
+  // release.json sidecar in the browser, (2) upload with the admin's OWN session (Storage policy: admins only), (3) admin_publish_addon.
+  // Who may download is NOT decided here: it is the add-on's feature switch under Pages -> Add-on features. A published release is immutable; to
+  // change a package publish a new version (higher seq). The app still verifies the signed manifest + SHA-256, so Storage is only transport.
+  async function pageAddons(main) {
+    const [releases, pageList, selections] = await Promise.all([rpc('admin_list_addon_releases'), rpc('admin_list_pages'),
+      rpc('admin_get_addon_selection').catch(() => [])]);                  // [] on a server without migration 0013
+    const known = { featureKeys: new Set(pageList.map((p) => p.page_key)) };
+    const rows = h('tbody', { id: 'addon-release-rows' }, releases.map((r) => h('tr', { 'data-addon': r.addon_id, 'data-version': r.version, 'data-yanked': r.yanked ? '1' : '0' },
+      h('td', {}, h('b', {}, r.title || r.addon_id), h('div', {}, h('code', {}, r.addon_id))),
+      h('td', {}, r.version, r.channel !== 'stable' ? h('span', { class: 'badge', style: 'margin-left:6px' }, r.channel) : null),
+      h('td', {}, String(r.seq)), h('td', {}, ADDON.fmtBytes(r.size)),
+      h('td', {}, h('code', { title: r.sha256 || '' }, ADDON.shortHash(r.sha256))),
+      h('td', {}, fmtShort(r.published_at)), h('td', {}, h('code', {}, r.feature_key)),
+      h('td', {}, r.yanked ? h('span', { class: 'badge suspended' }, 'Yanked') : r.is_active ? h('span', { class: 'badge ok', 'data-active': '1' }, 'Active') : h('span', { class: 'badge' }, 'Published')),
+      h('td', { class: 'actions' }, r.is_active ? null : (() => {
+        const why = ADDON.activateBlock(r), sel = ADDON.selectionFor(selections, r.addon_id);
+        return h('button', { class: 'btn small primary', 'data-act': 'activate', disabled: !!why, title: why || 'Offer this version to users', onclick: () => confirmBox(`Make ${r.addon_id} ${r.version} the active version?`,
+          'Apps move to this version (older ones too) the next time they check in, about every 5 minutes, and it starts after their next restart. If a version fails to start, the app keeps its last known good one.', 'Make active',
+          async () => { await act(() => rpc('admin_set_addon_active', { p_addon: r.addon_id, p_version: r.version, p_expected_revision: sel ? sel.revision : null }), `${r.addon_id} ${r.version} is now active`); go('addons'); }) }, 'Make active');
+      })(), r.yanked
+        ? h('button', { class: 'btn small', 'data-act': 'restore', onclick: async () => { await act(() => rpc('admin_yank_addon', { p_addon: r.addon_id, p_version: r.version, p_yank: false }), `${r.addon_id} ${r.version} restored`); go('addons'); } }, 'Restore')
+        : h('button', { class: 'btn small danger', 'data-act': 'yank', onclick: () => confirmBox(`Yank ${r.addon_id} ${r.version}?`,
+            'Users can no longer download this release. If it is the ACTIVE version, users are offered nothing until you choose another one (nothing is chosen for you), and apps running it stop it and use their last known good version. The file is kept; Restore never makes it active.', 'Yank',
+            async () => { await act(() => rpc('admin_yank_addon', { p_addon: r.addon_id, p_version: r.version, p_yank: true }), `${r.addon_id} ${r.version} yanked`); go('addons'); }) }, 'Yank')))));
+
+    // ---- per add-on: which version is active + Automatic / Restore previous
+    function selectionPanels() {
+      const ids = [...new Set(releases.map((r) => r.addon_id))];
+      if (!ids.length || !selections.length) return null;
+      return ids.map((id) => {
+        const sel = ADDON.selectionFor(selections, id), d = ADDON.describeSelection(sel), rev = sel ? sel.revision : null;
+        const title = (releases.find((r) => r.addon_id === id) || {}).title || id;
+        const call = (fn, params, msg) => async () => { await act(() => rpc(fn, params), msg); go('addons'); };
+        return h('div', { class: 'card', 'data-addon-sel': id, style: 'margin-bottom:10px' },
+          h('p', { style: 'margin:0 0 4px' }, h('b', {}, title), ' ', h('code', {}, id), ' — ', h('span', { class: 'badge' + (d.warn ? ' suspended' : ' ok'), 'data-kind': d.kind }, d.label)),
+          d.warn ? h('p', { class: 'warn', style: 'margin:0 0 6px' }, d.warn) : null,
+          sel && sel.updated_at ? h('p', { class: 'hint', style: 'margin:0 0 6px' }, `Last changed ${fmtShort(sel.updated_at)}${sel.updated_by_email ? ' by ' + sel.updated_by_email : ''}`) : null,
+          h('div', { class: 'row' },
+            sel && sel.mode !== 'auto' ? h('button', { class: 'btn small', 'data-act': 'auto', title: 'Offer the newest eligible release automatically', onclick: () => confirmBox(`Switch ${id} to Automatic?`, 'Users are offered the newest eligible release, including future ones, as soon as you publish them.', 'Automatic', call('admin_clear_addon_active', { p_addon: id, p_expected_revision: rev }, `${id}: automatic`)) }, 'Automatic (newest)') : null,
+            sel && sel.previous_version ? h('button', { class: 'btn small', 'data-act': 'restore-previous', disabled: !!sel.previous_block_reason, title: sel.previous_block_reason || `Go back to v${sel.previous_version}`,
+              onclick: call('admin_restore_previous_addon_active', { p_addon: id, p_expected_revision: rev }, `${id}: restored previous selection`) }, `Restore previous selection (v${sel.previous_version})`) : null));
+      });
+    }
+
+    // ---- publish form
+    const activateIn = h('input', { type: 'checkbox', id: 'addon-activate', checked: true });
+    const pkgIn = h('input', { type: 'file', id: 'addon-pkg', accept: '.mzaddon,application/zip' });
+    const sideIn = h('input', { type: 'file', id: 'addon-sidecar', accept: '.json,application/json' });
+    const checks = h('div', { id: 'addon-checks' });
+    const preview = h('div', { id: 'addon-preview' });
+    const status = h('div', { id: 'addon-status', 'aria-live': 'polite' });
+    const publishBtn = h('button', { class: 'btn primary', id: 'btn-addon-publish', type: 'button', disabled: true, onclick: () => runPublish() }, 'Upload and publish');
+    let ready = null;                                         // {release, buf} once every check passed
+    let uploaded = false;                                     // the package is already in Storage (a retry then only repeats the publish step)
+    let busy = false; let seqToken = 0;
+    const setStatus = (kind, text, actions) => status.replaceChildren(text ? h('div', { class: kind === 'err' ? 'banner' : 'card', style: 'margin-top:12px' },
+      h('p', { class: kind === 'err' ? 'warn' : '', style: 'margin:0 0 8px' }, text), actions ? h('div', { class: 'row' }, actions) : null) : []);
+    const line = (ok, text) => h('li', { class: ok ? 'ok' : 'bad' }, h('span', { class: 'badge ' + (ok ? 'ok' : 'suspended') }, ok ? 'OK' : 'Problem'), ' ', text);
+
+    async function check() {
+      const my = ++seqToken; ready = null; uploaded = false; publishBtn.disabled = true; setStatus(); preview.replaceChildren();
+      if (!pkgIn.files[0] || !sideIn.files[0]) { checks.replaceChildren(h('p', { class: 'hint' }, 'Choose the signed package (.mzaddon) and its release.json from your build tool.')); return; }
+      const out = [];
+      let res; try { res = ADDON.parseSidecar(await sideIn.files[0].text(), known); } catch (e) { res = { ok: false, errors: ['Could not read release.json: ' + e.message] }; }
+      if (my !== seqToken) return;
+      if (!res.ok) res.errors.forEach((e) => out.push(line(false, e))); else out.push(line(true, 'release.json is valid'));
+      let buf = null, pkg = null;
+      try {
+        buf = await pkgIn.files[0].arrayBuffer();
+        pkg = { name: pkgIn.files[0].name, size: buf.byteLength, head: new Uint8Array(buf.slice(0, 4)), sha256: await ADDON.sha256Hex(buf, window.crypto && window.crypto.subtle) };
+      } catch (e) { out.push(line(false, 'Could not read/hash the package: ' + e.message)); }
+      if (my !== seqToken) return;
+      if (pkg) out.push(line(true, `Package: ${pkg.name}, ${ADDON.fmtBytes(pkg.size)} (${pkg.size} bytes), SHA-256 ${pkg.sha256}`));
+      let errs = [];
+      if (res.ok && pkg) {
+        errs = ADDON.checkPackage(res.release, pkg).concat(ADDON.conflictsWith(res.release, releases));
+        if (!errs.length) out.push(line(true, 'The package matches release.json (size and SHA-256), and the version/seq are new'));
+        errs.forEach((e) => out.push(line(false, e)));
+      }
+      checks.replaceChildren(h('ul', { class: 'checks' }, out));
+      if (res.ok) {
+        const r = res.release;
+        preview.replaceChildren(h('div', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Release preview'),
+          h('p', { style: 'margin:0 0 4px' }, h('b', {}, r.title), ` — ${r.addon_id} ${r.version} (seq ${r.seq}, ${r.channel})`),
+          h('p', {}, r.summary || '—'),
+          h('p', { class: 'hint' }, `Unlocked by feature ${r.feature_key} · works with core ${r.min_core || 'any'} to ${r.max_core || 'any'} · uploads to ${r.storage_path}`),
+          ADDON.noteSections(r.notes).map(([t, lines]) => h('div', {}, h('h3', { style: 'margin-top:10px' }, t), h('ul', {}, lines.map((x) => h('li', {}, x))))),
+          ADDON.noteSections(r.notes).length ? null : h('p', { class: 'hint' }, 'No release notes in this release.')));
+      }
+      if (res.ok && pkg && !errs.length) { ready = { release: res.release, buf }; publishBtn.disabled = false; }
+    }
+    pkgIn.addEventListener('change', check); sideIn.addEventListener('change', check);
+
+    async function runPublish() {
+      if (busy || !ready) return;
+      busy = true; publishBtn.disabled = true; pkgIn.disabled = sideIn.disabled = true;
+      const { release, buf } = ready; const retry = () => runPublish();
+      const fail = (stage, msg) => {
+        busy = false; publishBtn.disabled = false; pkgIn.disabled = sideIn.disabled = false; toast(msg, true);
+        const acts = [h('button', { class: 'btn small primary', id: 'btn-addon-retry', type: 'button', onclick: retry }, 'Retry')];
+        if (uploaded) acts.push(h('button', { class: 'btn small danger', id: 'btn-addon-remove', type: 'button', onclick: async () => {
+          const { error } = await sb.storage.from('addons').remove([release.storage_path]);
+          if (error) return toast('Could not remove the uploaded file: ' + error.message, true);
+          uploaded = false; toast('Uploaded file removed'); setStatus('err', 'The uploaded file was removed. Nothing is published.', [h('button', { class: 'btn small primary', type: 'button', onclick: retry }, 'Retry upload and publish')]);
+        } }, 'Remove uploaded file'));
+        setStatus('err', stage === 'upload'
+          ? `Upload failed, so NOTHING was published: ${msg}`
+          : `The package was uploaded to Storage but the release was NOT published: ${msg}. Users cannot see or download it. Retry will repeat only the publish step; or remove the uploaded file.`, acts);
+      };
+      try {
+        const fresh = await rpc('admin_list_addon_releases');                 // someone may have published meanwhile: re-check before touching Storage
+        const conflicts = ADDON.conflictsWith(release, fresh);
+        if (conflicts.length) { busy = false; pkgIn.disabled = sideIn.disabled = false; setStatus('err', conflicts.join(' ')); toast('Not published: ' + conflicts[0], true); return; }
+      } catch (e) { return fail('upload', 'Could not check the existing releases: ' + e.message); }
+      if (!uploaded) {
+        setStatus('info', `Uploading ${ADDON.fmtBytes(release.size)} to Storage…`);
+        const { error } = await sb.storage.from('addons').upload(release.storage_path, buf, { contentType: 'application/zip', upsert: true });
+        if (error) return fail('upload', error.message || String(error));
+        uploaded = true;
+      }
+      setStatus('info', 'Package uploaded. Publishing the release…');
+      try {
+        await rpc('admin_publish_addon', { p: release });
+      } catch (e) { return fail('publish', e.message); }
+      let activated = false;
+      if (activateIn.checked) {
+        try {
+          const cur = ADDON.selectionFor(await rpc('admin_get_addon_selection').catch(() => []), release.addon_id);
+          await rpc('admin_set_addon_active', { p_addon: release.addon_id, p_version: release.version, p_expected_revision: cur ? cur.revision : null });
+          activated = true;
+        } catch (e) { toast(`Published, but could not make it active: ${e.message}. Use “Make active” in the table.`, true); }
+      }
+      busy = false; toast(`${release.addon_id} ${release.version} published${activated ? ' and active' : ''}`);
+      go('addons');
+    }
+
+    main.replaceChildren(
+      h('div', { class: 'toolbar' }, h('h2', {}, 'Add-ons'), h('button', { class: 'btn small', id: 'btn-addons-refresh', onclick: () => go('addons') }, 'Refresh')),
+      h('p', { class: 'hint' }, 'Optional modules the app downloads. Who may download and use each one is set under Pages → Add-on features. Free users see every add-on in the app; locked ones have Download disabled. Publishing a release does not change what users get unless “Make active after publishing” is ticked: the ACTIVE version is the only one offered. You can make an older version active again (rollback).'),
+      h('div', { id: 'addon-selection' }, selectionPanels()),
+      h('div', { class: 'tablewrap' }, h('table', { id: 'addon-releases' }, h('thead', {}, h('tr', {}, ['Add-on', 'Version', 'Seq', 'Size', 'SHA-256', 'Published', 'Feature key', 'State', 'Actions'].map((x) => h('th', {}, x)))),
+        releases.length ? rows : h('tbody', {}, h('tr', {}, h('td', { colspan: '9' }, 'No releases published yet.'))))),
+      h('div', { class: 'card', id: 'addon-publish', style: 'margin-top:20px' }, h('h3', {}, 'Publish a new release'),
+        h('p', { class: 'hint' }, 'Use the two files your build tool produced. The panel checks that the package is exactly what release.json describes (size and SHA-256 are computed here, in your browser) before anything is uploaded.'),
+        h('div', { class: 'field' }, h('label', {}, 'Signed package (.mzaddon, a ZIP)'), pkgIn),
+        h('div', { class: 'field' }, h('label', {}, 'Release sidecar (release.json)'), sideIn),
+        h('div', { class: 'field' }, h('label', {}, activateIn, ' Make active after publishing (users are offered this version)')),
+        checks, preview, h('div', { class: 'row', style: 'margin-top:12px' }, publishBtn), status));
+    checks.replaceChildren(h('p', { class: 'hint' }, 'Choose the signed package (.mzaddon) and its release.json from your build tool.'));
   }
 
   // ------------------------------------------------------ API configuration

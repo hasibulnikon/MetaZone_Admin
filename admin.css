@@ -294,3 +294,9 @@ tr.prov td { background:var(--bg-raised); }
   #toasts { left:12px; right:12px; bottom:calc(12px + env(safe-area-inset-bottom)); } .toast { max-width:none; }
   .center { padding:14px; } .gate { padding:26px 20px; }
 }
+
+/* v0.9.9.10: Add-ons tab (publish form checks) and grouped Pages tables */
+ul.checks { list-style:none; margin:var(--sp-3) 0 0; padding:0; } ul.checks li { padding:3px 0; color:var(--text-dim); font-size:var(--fs-sm); word-break:break-all; }
+#addon-publish input[type=file] { width:100%; max-width:520px; }
+#addon-preview ul { margin:4px 0 0; padding-left:18px; color:var(--text-dim); }
+td > .hint { font-size:var(--fs-xs); margin-top:2px; }
