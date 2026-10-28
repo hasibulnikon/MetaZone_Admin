@@ -14,6 +14,7 @@
   let adminEmail = '';
   let tab = 'overview';
   let refreshTimer = null;
+  let historyAddon = null;                                 // Step 2.3: which add-on's version history is shown (kept across reloads of the tab)
 
   // ---------------------------------------------------------------- helpers
   function h(tag, attrs, ...kids) {
@@ -46,15 +47,15 @@
     try { const r = await fn(); if (okMsg) toast(okMsg); return r; }
     catch (e) { toast(e.message, true); throw e; }
   }
-  function modal(title, body, buttons) {
+  function modal(title, body, buttons, canClose) {          // canClose (optional, Step 2.4): returns false while closing the window would lose work in progress
     const close = () => { document.removeEventListener('keydown', onKey); ov.remove(); };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const onKey = (e) => { if (e.key === 'Escape' && (!canClose || canClose())) close(); };
     const foot = h('div', { class: 'foot' }, buttons.map((b) => h('button', {
       class: 'btn ' + (b.cls || ''), type: 'button',
       onclick: async (ev) => { ev.target.disabled = true; try { const keep = await b.run(close); if (keep === true) ev.target.disabled = false; } catch (e) { ev.target.disabled = false; } },
     }, b.label)));
     const ov = h('div', { class: 'overlay', role: 'dialog' }, h('div', { class: 'modal' }, h('h2', {}, title), body, foot));
-    ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('mousedown', (e) => { if (e.target === ov && (!canClose || canClose())) close(); });
     document.addEventListener('keydown', onKey);
     document.body.append(ov);
     const first = ov.querySelector('input, textarea, select');
@@ -444,6 +445,104 @@
       c(); go('notices'); } }]);
   }
 
+  // ------------------------------------------------- Step 4.3A: Dashboard Shortcuts (configuration only; the app Dashboard does not read this yet)
+  // Reads get_my_dashboard_shortcuts(), edits a DRAFT in the browser, saves with admin_set_dashboard_shortcuts({ p_keys }). The list shown as
+  // "saved" only ever changes after the server's answer matches what was sent; the draft never counts as saved. Needs migration 0015.
+  function shortcutsCard(pageList) {
+    const supported = ADDON.supportedShortcutPages(pageList);
+    const info = new Map((Array.isArray(pageList) ? pageList : []).map((p) => [p.page_key, p]));
+    const labelOf = (k) => (info.get(k) && info.get(k).label) || k;
+    const box = h('div', { id: 'shortcuts-body' });
+    const st = { phase: 'loading', saved: null, draft: null, msg: null, kind: null };   // phase: loading | ready | saving | missing | error
+    const alive = () => box.isConnected;
+    const say = (kind, msg) => { st.kind = kind; st.msg = msg; };
+
+    async function load() {
+      st.phase = 'loading'; say(null, null); draw();
+      try {
+        const keys = ADDON.parseShortcutsResult(await rpc('get_my_dashboard_shortcuts'));
+        if (!alive()) return;
+        if (!keys) { st.phase = 'error'; say('err', 'The server answered, but not with a shortcut list. Nothing was changed.'); }
+        else { st.phase = 'ready'; st.saved = keys; st.draft = keys.slice(); }
+      } catch (e) {
+        if (!alive()) return;
+        if (ADDON.isMissingRpcError(e.message, 'get_my_dashboard_shortcuts')) st.phase = 'missing';
+        else { st.phase = 'error'; say('err', 'Could not load the shortcut list: ' + e.message); }
+      }
+      draw();
+    }
+    async function save() {
+      const keys = st.draft.slice(), problems = ADDON.shortcutProblems(keys, supported);
+      if (problems.length) { say('err', problems.join(' ')); draw(); return; }
+      st.phase = 'saving'; say(null, 'Saving… waiting for the server to confirm.'); draw();
+      const call = ADDON.shortcutsSaveCall(keys);
+      try {
+        const data = await rpc(call.fn, call.params);
+        if (!alive()) return;
+        if (ADDON.shortcutsConfirmed(data, keys)) {
+          st.phase = 'ready'; st.saved = keys; st.draft = keys.slice(); say('ok', 'Saved. The server confirmed this list.'); toast('Dashboard shortcuts saved');
+        } else {
+          st.phase = 'error'; say('err', 'The server did not return the list that was sent, so the save is NOT confirmed. Use “Reload from server” to see what is stored.');
+        }
+      } catch (e) {
+        if (!alive()) return;
+        st.phase = ADDON.isMissingRpcError(e.message, 'admin_set_dashboard_shortcuts') ? 'missing' : 'ready';
+        if (st.phase === 'ready') say('err', 'Not saved: ' + e.message + ' (If this was a network error the server may or may not have stored it: use “Reload from server”.)');
+        if (st.phase === 'ready') toast('Dashboard shortcuts not saved', true);
+      }
+      draw();
+    }
+    const edit = (r) => { if (r.error) say('err', r.error); else { st.draft = r.list; say(null, null); } draw(); };
+    function resetDefault() {
+      const problems = ADDON.shortcutProblems(ADDON.SHORTCUT_DEFAULT, supported);
+      if (problems.length) { say('err', 'The default list cannot be used here: ' + problems.join(' ')); draw(); return; }
+      st.draft = ADDON.SHORTCUT_DEFAULT.slice(); say('info', 'Default list loaded into the editor. It is NOT saved until you press Save.'); draw();
+    }
+
+    function draw() {
+      const kids = [];
+      if (st.phase === 'loading') kids.push(h('p', { class: 'hint', 'data-state': 'loading' }, 'Loading shortcuts…'));
+      else if (st.phase === 'missing') kids.push(h('p', { class: 'hint', 'data-state': 'missing' }, 'Migration 0015 (dashboard shortcuts) is not applied on this server, so the list cannot be loaded or saved. Apply 0015_dashboard_shortcuts.sql first.'));
+      else if (st.phase === 'error' && !st.draft) kids.push(h('p', { class: 'hint', 'data-state': 'error' }, '⚠ ' + st.msg), h('button', { class: 'btn small', type: 'button', 'data-act': 'sc-reload', onclick: load }, 'Try again'));
+      else {
+        const busy = st.phase === 'saving', draft = st.draft, full = draft.length >= ADDON.SHORTCUT_MAX;
+        const dirty = !ADDON.shortcutsEqual(draft, st.saved), problems = ADDON.shortcutProblems(draft, supported);
+        const rows = draft.map((k, i) => {
+          const req = ADDON.SHORTCUT_REQUIRED.includes(k), p = info.get(k);
+          return h('li', { 'data-key': k, style: 'display:flex;align-items:center;gap:8px;padding:5px 0;flex-wrap:wrap' },
+            h('span', { class: 'hint', style: 'width:1.6em' }, String(i + 1) + '.'), h('strong', {}, labelOf(k)), h('code', {}, k),
+            req ? h('span', { class: 'badge' }, 'Always included') : null,
+            p && p.enabled === false && !req ? h('span', { class: 'badge suspended', title: 'This page is switched off for everyone, so the app hides its button.' }, 'Page is off') : null,
+            h('span', { style: 'margin-left:auto;display:flex;gap:5px' },
+              h('button', { class: 'btn small', type: 'button', 'data-act': 'sc-up', disabled: busy || i === 0, title: 'Move up', onclick: () => edit(ADDON.shortcutMove(draft, k, -1)) }, '↑'),
+              h('button', { class: 'btn small', type: 'button', 'data-act': 'sc-down', disabled: busy || i === draft.length - 1, title: 'Move down', onclick: () => edit(ADDON.shortcutMove(draft, k, 1)) }, '↓'),
+              h('button', { class: 'btn small danger', type: 'button', 'data-act': 'sc-remove', disabled: busy || req, title: req ? 'Home and Settings cannot be removed' : 'Remove from the shortcuts', onclick: () => edit(ADDON.shortcutRemove(draft, k)) }, 'Remove')));
+        });
+        const choices = supported.filter((x) => !draft.includes(x.key));
+        const sel = h('select', { id: 'shortcuts-add-select', disabled: busy || full || !choices.length, 'aria-label': 'Page to add' },
+          choices.map((x) => h('option', { value: x.key }, `${x.label} (${x.key})`)));
+        kids.push(
+          h('ol', { id: 'shortcuts-list', style: 'list-style:none;margin:0 0 8px;padding:0' }, rows),
+          h('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0' }, sel,
+            h('button', { class: 'btn small', type: 'button', 'data-act': 'sc-add', disabled: busy || full || !choices.length, onclick: () => edit(ADDON.shortcutAdd(draft, sel.value, supported)) }, 'Add'),
+            h('span', { class: 'hint', 'data-hint': 'sc-count' }, `${draft.length} of ${ADDON.SHORTCUT_MAX}` + (full ? ' (full)' : !choices.length ? ' (no other page to add)' : ''))),
+          h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-top:8px' },
+            h('button', { class: 'btn primary', type: 'button', 'data-act': 'sc-save', disabled: busy || !dirty || problems.length > 0, onclick: save }, busy ? 'Saving…' : 'Save shortcuts'),
+            h('button', { class: 'btn', type: 'button', 'data-act': 'sc-default', disabled: busy, onclick: resetDefault, title: 'Fills the editor with the default list; nothing is saved until you press Save' }, 'Reset to default'),
+            h('button', { class: 'btn ghost', type: 'button', 'data-act': 'sc-reload', disabled: busy, onclick: load }, 'Reload from server')),
+          dirty && !busy ? h('p', { class: 'hint', 'data-state': 'dirty' }, 'Unsaved changes.') : null,
+          problems.length ? h('p', { class: 'hint', 'data-state': 'problems' }, '⚠ ' + problems.join(' ')) : null);
+      }
+      if (st.msg && st.phase !== 'loading') kids.push(h('p', { class: 'hint', 'data-state': st.kind || 'info', role: st.kind === 'err' ? 'alert' : 'status' }, (st.kind === 'ok' ? '✓ ' : st.kind === 'err' ? '⚠ ' : '') + st.msg));
+      box.replaceChildren(...kids);
+    }
+    load();
+    return h('div', { class: 'card', id: 'shortcuts-card', style: 'margin:14px 0' },
+      h('h3', {}, 'Dashboard Shortcuts'),
+      h('p', { class: 'hint' }, `The buttons of the app's Dashboard (up to ${ADDON.SHORTCUT_MAX}, in this order). Home and Settings always stay. A page that is switched off for a user is hidden for that user. This only saves the list on the server: the app's Dashboard does not use it yet.`),
+      box);
+  }
+
   // ------------------------------------------------------------------ pages
   // v0.9.9.4: switch the app's pages on/off -- for everyone (this tab) or for one user (Users -> Pages).
   // A per-user setting beats the global one. Home and Settings are locked (always on). The app hides a
@@ -451,6 +550,9 @@
   // refuses their generation batches.
   async function pagePages(main) {
     const list = await rpc('admin_list_pages');
+    // Step 4.B (migration 0016): where a page shows. null = the server has no 0016 yet (the placement controls then say so).
+    let placement = null;
+    try { placement = ADDON.parsePlacement(await rpc('admin_list_page_placement')); } catch (e) { placement = null; }
     // v0.9.9.9: every page has a Free switch and a Premium switch (migration 0011). A page reaches a user when the "Everyone" master
     // switch is on AND the switch for the user's plan is on -- unless you forced it on/off for that one account (Users -> Pages), which wins.
     const planBtn = (p, plan) => {
@@ -461,12 +563,30 @@
         if (on) confirmBox(`Switch ${p.label} off for ${plan} users?`, `Every ${plan} account loses it, except accounts you have forced it ON for (Users → Pages). Their data is not touched.`, 'Switch off', go2); else go2();
       } }, h('span', { class: 'dot' + (on ? ' on' : '') }), on ? 'On' : 'Off');
     };
+    // Left navigation = PLACEMENT only. Hiding a page here does not disable it (use "Turn off for everyone" for that) and does not touch
+    // the Dashboard shortcuts, which are configured separately above.
+    const navCell = (p) => {
+      if (p.kind !== 'page') return '—';
+      if (placement === null) return h('span', { class: 'hint', 'data-state': 'missing', title: 'Apply migration 0016 first' }, 'needs 0016');
+      const pl = placement[p.page_key];
+      if (!pl) return '—';
+      if (p.locked || p.protected || pl.protected) return 'Always shown';
+      const on = pl.nav_visible;
+      return h('button', { class: 'btn small' + (on ? '' : ' danger'), 'data-act': 'nav', title: on ? 'Remove from the left navigation (the page stays available)' : 'Show in the left navigation',
+        onclick: async () => {
+          const call = ADDON.navVisibleCall(p.page_key, !on);
+          try { const data = await rpc(call.fn, call.args); if (!ADDON.navConfirmed(data, p.page_key, !on)) throw new Error('The server did not confirm the change.'); toast(`${p.label}: ${on ? 'hidden from' : 'shown in'} the left navigation`); }
+          catch (e) { toast('Not changed: ' + e.message, true); }
+          go('pages');
+        } }, h('span', { class: 'dot' + (on ? ' on' : '') }), on ? 'Shown' : 'Hidden');
+    };
     const hints = { tracker: 'Also controls the Adobe Tracker add-on.' };
     const pageRow = (p) => h('tr', { 'data-page': p.page_key },
       h('td', {}, p.label, hints[p.page_key] ? h('div', { class: 'hint', 'data-hint': p.page_key }, hints[p.page_key]) : null), h('td', {}, h('code', {}, p.page_key)),
       h('td', { 'data-col': 'free' }, planBtn(p, 'free')),
       h('td', { 'data-col': 'premium' }, planBtn(p, 'premium')),
       h('td', {}, h('span', { class: 'dot' + (p.enabled || p.locked ? ' on' : '') }), p.locked || p.protected ? 'Always on (protected)' : (p.enabled ? 'On' : 'Off for everyone')),
+      h('td', { 'data-col': 'nav' }, navCell(p)),
       h('td', {}, p.overrides_on || p.overrides_off
         ? [p.overrides_on ? h('span', { class: 'badge', style: 'margin-right:6px' }, `${p.overrides_on} forced on`) : null,
            p.overrides_off ? h('span', { class: 'badge suspended' }, `${p.overrides_off} forced off`) : null]
@@ -478,12 +598,14 @@
           if (p.enabled) confirmBox(`Turn off ${p.label} for everyone?`, 'It disappears for every user, whatever their plan - including accounts you forced it ON for. Their data is not touched.', 'Turn off', go2); else go2();
         } }, p.enabled ? 'Turn off for everyone' : 'Turn on')));
     const table = (id, items) => h('div', { class: 'tablewrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Page', 'Key', 'Free plan', 'Premium plan', 'Everyone', 'Per-user exceptions', 'Last changed', 'Actions'].map((x) => h('th', {}, x)))),
+      h('thead', {}, h('tr', {}, ['Page', 'Key', 'Free plan', 'Premium plan', 'Everyone', 'Left navigation', 'Per-user exceptions', 'Last changed', 'Actions'].map((x) => h('th', {}, x)))),
       h('tbody', { id }, items.map(pageRow))));
     const groups = ADDON.groupPages(list);                   // v0.9.9.10 (0012): 'Pages' and 'Add-on features'; 'settings' is never shown
     main.replaceChildren(
       h('div', { class: 'toolbar' }, h('h2', {}, 'Pages')),
       h('p', { class: 'hint' }, 'Choose which plan gets each page: the Free and Premium switches are independent (for example Tracker: Free off, Premium on). The “Everyone” switch is a master switch: when it is OFF the page is gone for ALL accounts, even ones you forced it on for. While it is ON, you can give or take a page for ONE account whatever its plan (Users → Pages): that exception beats the Free/Premium switches. Home and Settings can never be switched off (protected). Users see the change within a few minutes (next heartbeat), or right away on their next generation attempt.'),
+      shortcutsCard(list),
+      registerPageCard(list, placement),
       h('h3', { id: 'grp-pages' }, 'Pages'), table('page-rows', groups.pages),
       h('h3', { id: 'grp-addons', style: 'margin-top:22px' }, 'Add-on features'),
       h('p', { class: 'hint' }, 'These control who can download and use each add-on. Free users still see locked add-ons in the app, with Download disabled.'),
@@ -492,6 +614,33 @@
       h('p', { class: 'hint' }, 'The last page and add-on-version changes: who, what, when.'),
       h('div', { id: 'control-audit' }, h('p', { class: 'hint' }, 'Loading…')));
     loadAudit(main.querySelector('#control-audit'));         // this navigation's own box (a global lookup could hit a newer Pages screen)
+  }
+  // Step 4.B: create the page switch for an add-on page (no developer migration). The page starts OFF for everyone; publishing the add-on
+  // package (Add-ons) and turning the page on are separate, explicit steps. Core page keys are refused here and again by the server.
+  function registerPageCard(list, placement) {
+    const existing = (Array.isArray(list) ? list : []).map((p) => p && p.page_key).filter(Boolean);
+    const key = h('input', { id: 'reg-key', type: 'text', maxlength: '32', placeholder: 'page_key (a-z, 0-9, _)', 'aria-label': 'Page key', autocomplete: 'off', spellcheck: 'false' });
+    const label = h('input', { id: 'reg-label', type: 'text', maxlength: '40', placeholder: 'Label shown in the Admin', 'aria-label': 'Page label', autocomplete: 'off' });
+    const msg = h('p', { class: 'hint', id: 'reg-msg', 'aria-live': 'polite' }, '');
+    const btn = h('button', { class: 'btn primary', type: 'button', 'data-act': 'register-page', onclick: async () => {
+      const problems = ADDON.registerPageProblems(key.value, label.value, existing);
+      if (problems.length) { msg.textContent = problems.join(' '); return; }
+      const call = ADDON.registerPageCall(key.value, label.value);
+      btn.disabled = true; msg.textContent = 'Registering…';
+      try {
+        const data = await rpc(call.fn, call.args);
+        if (!ADDON.registerConfirmed(data, key.value)) throw new Error('The server did not confirm the registration.');
+        toast(`Page ${key.value} registered (off until you turn it on)`); go('pages'); return;
+      } catch (e) {
+        msg.textContent = ADDON.isMissingRpcError(e.message, 'admin_register_page') ? 'Migration 0016 is not applied on this server, so pages cannot be registered. Apply 0016_page_registry_and_nav.sql first.' : 'Not registered: ' + e.message;
+        btn.disabled = false;
+      }
+    } }, 'Register page');
+    return h('div', { class: 'card', id: 'register-page-card', style: 'margin:14px 0' },
+      h('h3', {}, 'Register an add-on page'),
+      h('p', { class: 'hint' }, 'Creates the page switch an add-on needs before its package can be published (Add-ons → feature key). The page starts OFF for everyone. Built-in page keys are refused. Where it appears (Dashboard shortcuts, left navigation) is configured separately.'),
+      placement === null ? h('p', { class: 'hint', 'data-state': 'missing' }, 'Migration 0016 does not seem to be applied on this server yet.') : null,
+      h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center' }, key, label, btn), msg);
   }
   async function loadAudit(box) {
     if (!box) return;
@@ -536,8 +685,9 @@
   // Who may download is NOT decided here: it is the add-on's feature switch under Pages -> Add-on features. A published release is immutable; to
   // change a package publish a new version (higher seq). The app still verifies the signed manifest + SHA-256, so Storage is only transport.
   async function pageAddons(main) {
-    const [releases, pageList, selections] = await Promise.all([rpc('admin_list_addon_releases'), rpc('admin_list_pages'),
-      rpc('admin_get_addon_selection').catch(() => [])]);                  // [] on a server without migration 0013
+    const [releases, pageList, selections, managed] = await Promise.all([rpc('admin_list_addon_releases'), rpc('admin_list_pages'),
+      rpc('admin_get_addon_selection').catch(() => []),                    // [] on a server without migration 0013
+      rpc('admin_list_addons').then((data) => ({ ok: true, data }), (e) => ({ ok: false, error: e.message }))]);   // Step 2.1 (0014): never breaks the tab
     const known = { featureKeys: new Set(pageList.map((p) => p.page_key)) };
     const rows = h('tbody', { id: 'addon-release-rows' }, releases.map((r) => h('tr', { 'data-addon': r.addon_id, 'data-version': r.version, 'data-yanked': r.yanked ? '1' : '0' },
       h('td', {}, h('b', {}, r.title || r.addon_id), h('div', {}, h('code', {}, r.addon_id))),
@@ -552,10 +702,10 @@
           'Apps move to this version (older ones too) the next time they check in, about every 5 minutes, and it starts after their next restart. If a version fails to start, the app keeps its last known good one.', 'Make active',
           async () => { await act(() => rpc('admin_set_addon_active', { p_addon: r.addon_id, p_version: r.version, p_expected_revision: sel ? sel.revision : null }), `${r.addon_id} ${r.version} is now active`); go('addons'); }) }, 'Make active');
       })(), r.yanked
-        ? h('button', { class: 'btn small', 'data-act': 'restore', onclick: async () => { await act(() => rpc('admin_yank_addon', { p_addon: r.addon_id, p_version: r.version, p_yank: false }), `${r.addon_id} ${r.version} restored`); go('addons'); } }, 'Restore')
+        ? h('button', { class: 'btn small', 'data-act': 'restore', onclick: async () => { await act(() => { const c = ADDON.selectionCall.yank(r.addon_id, r.version, false, (ADDON.selectionFor(selections, r.addon_id) || {}).revision); return rpc(c.fn, c.params); }, `${r.addon_id} ${r.version} restored`); go('addons'); } }, 'Restore')
         : h('button', { class: 'btn small danger', 'data-act': 'yank', onclick: () => confirmBox(`Yank ${r.addon_id} ${r.version}?`,
             'Users can no longer download this release. If it is the ACTIVE version, users are offered nothing until you choose another one (nothing is chosen for you), and apps running it stop it and use their last known good version. The file is kept; Restore never makes it active.', 'Yank',
-            async () => { await act(() => rpc('admin_yank_addon', { p_addon: r.addon_id, p_version: r.version, p_yank: true }), `${r.addon_id} ${r.version} yanked`); go('addons'); }) }, 'Yank')))));
+            async () => { await act(() => { const c = ADDON.selectionCall.yank(r.addon_id, r.version, true, (ADDON.selectionFor(selections, r.addon_id) || {}).revision); return rpc(c.fn, c.params); }, `${r.addon_id} ${r.version} yanked`); go('addons'); }) }, 'Yank')))));
 
     // ---- per add-on: which version is active + Automatic / Restore previous
     function selectionPanels() {
@@ -576,8 +726,507 @@
       });
     }
 
+    // ---- Step 2.1: Add-on manager list (real admin_list_addons() data). Step 2.2 adds create / edit of name + description (admin_upsert_addon).
+    function managerPanel() {
+      const box = h('div', { class: 'card', id: 'addon-manager', style: 'margin-bottom:20px' }, h('h3', {}, 'Add-on manager'));
+      if (!managed.ok) {
+        const missing = ADDON.isMissingRpcError(managed.error, 'admin_list_addons');
+        box.append(h('p', { class: 'warn', id: 'addon-manager-error', 'data-missing': missing ? '1' : '0' }, missing
+          ? 'The add-on list is not available on this server: database migration 0014 has not been applied yet. The release table below works as before.'
+          : 'Could not load the add-on list: ' + managed.error));
+        return box;
+      }
+      const list = ADDON.describeManagedAddons(managed.data), sum = ADDON.summarizeManagedAddons(list);
+
+      // ---- Step 2.2: create / edit name + description through the REAL admin_upsert_addon(p_addon, p_name, p_description).
+      // The RPC is an upsert: it would silently overwrite an existing id. So the id is checked against the list here, AND against a fresh
+      // admin_list_addons() read right before saving (the list on screen may be stale). Only name + description are written; no release,
+      // selection, Storage object, signing key or forced-update setting is touched.
+      function addonForm(mode, a) {
+        const creating = mode === 'create';
+        const idIn = h('input', { type: 'text', id: 'addon-form-id', autocomplete: 'off', spellcheck: 'false', placeholder: 'e.g. sample_addon', value: creating ? '' : a.id, readonly: !creating });
+        const nameIn = h('input', { type: 'text', id: 'addon-form-name', autocomplete: 'off', value: creating ? '' : a.name });
+        const descIn = h('textarea', { id: 'addon-form-description' }, creating ? '' : a.description);
+        const err = (k) => h('div', { class: 'warn', 'data-err': k, style: 'display:none;margin-top:4px' });
+        const errEls = { id: err('id'), name: err('name'), description: err('description'), form: h('p', { class: 'warn', id: 'addon-form-error', 'data-err': 'form', style: 'display:none' }) };
+        const show = (errors) => { for (const k of Object.keys(errEls)) { const m = errors && errors[k]; errEls[k].textContent = m || ''; errEls[k].style.display = m ? '' : 'none'; } };
+        const body = h('div', { id: 'addon-form' },
+          creating ? null : h('p', { class: 'hint' }, a.registered ? 'The id cannot be changed.' : 'This add-on has releases but no name/description record yet. Saving creates that record.'),
+          h('div', { class: 'field' }, h('label', { for: 'addon-form-id' }, 'Add-on id'), idIn, errEls.id,
+            creating ? h('div', { class: 'hint' }, 'Lowercase letters a-z, digits 0-9 and underscore, 1 to 32 characters. Cannot be changed later. Use the same id as the add-on package.') : null),
+          h('div', { class: 'field' }, h('label', { for: 'addon-form-name' }, 'Name (required, up to 80 characters)'), nameIn, errEls.name),
+          h('div', { class: 'field' }, h('label', { for: 'addon-form-description' }, 'Description (optional, up to 400 characters)'), descIn, errEls.description),
+          errEls.form,
+          h('p', { class: 'hint' }, 'Saving writes only the name and description. It does not publish, activate or change any release, and it does not add the add-on to the MetaZone app (the app only offers add-ons it already knows by id).'));
+        const fail = (msg) => { show({ form: msg }); toast(msg, true); return true; };     // true = keep the window open
+        const save = async (close) => {
+          show(null);
+          const draft = { id: idIn.value, name: nameIn.value, description: descIn.value };
+          let chk = ADDON.checkAddonDraft(draft, mode, list);
+          if (!chk.ok) { show(chk.errors); return true; }
+          let fresh;
+          try { fresh = ADDON.describeManagedAddons(await rpc('admin_list_addons')); }               // never overwrite blindly: re-read the real list first
+          catch (e) { return fail('Could not check the current add-on list, nothing was saved: ' + e.message); }
+          chk = ADDON.checkAddonDraft(draft, mode, fresh);
+          if (!chk.ok) { show(chk.errors); return true; }
+          let saved;
+          try { saved = await rpc('admin_upsert_addon', chk.params); }
+          catch (e) { return fail(ADDON.isMissingRpcError(e.message, 'admin_upsert_addon') ? 'Not saved: database migration 0014 has not been applied on this server yet.' : 'Not saved: ' + e.message); }
+          if (!ADDON.savedRowMatches(saved, chk.params.p_addon)) return fail('The server did not confirm the save. Close this window, refresh the list and check before trying again.');
+          close();
+          toast(`Add-on “${chk.params.p_name}” (${chk.params.p_addon}) ${creating ? 'created' : (a.registered ? 'updated' : 'registered')}`);
+          go('addons');                                                                                 // reload the list from the server
+          return false;
+        };
+        modal(creating ? 'New add-on' : `Edit add-on: ${a.id}`, body, [{ label: 'Cancel', run: (c) => c() }, { label: creating ? 'Create add-on' : 'Save changes', cls: 'primary', run: save }]);
+      }
+
+      const body = list.map((a) => h('tr', { 'data-addon': a.id },
+        h('td', {}, h('b', {}, a.name), h('div', {}, h('code', {}, a.id)), a.description ? h('div', { class: 'hint' }, a.description) : null),
+        h('td', {}, a.featureKey ? h('code', {}, a.featureKey) : '—'),
+        h('td', {}, `${a.releases.total} release${a.releases.total === 1 ? '' : 's'}`,
+          a.releases.yanked ? h('div', { class: 'hint' }, `${a.releases.yanked} yanked`) : null,
+          a.releases.deleted ? h('div', { class: 'hint' }, `${a.releases.deleted} deleted`) : null),
+        h('td', {}, a.latestVersion || '—'),
+        h('td', {}, h('span', { class: 'badge' + (a.offered.version ? ' ok' : ''), 'data-kind': a.offered.kind }, a.offered.label), a.offered.warn ? h('div', { class: 'hint' }, a.offered.warn) : null),
+        h('td', {}, a.registered ? h('span', { class: 'badge ok' }, 'Registered') : h('span', { class: 'badge', title: 'Releases exist but there is no name/description record for this add-on yet' }, 'Not registered')),
+        h('td', {}, fmtShort(a.updatedAt)),
+        h('td', { class: 'actions' },
+          a.releases.total > 0 ? h('button', { class: 'btn small', type: 'button', 'data-act': 'show-versions', title: 'Show the version history of this add-on', onclick: () => showHistory(a.id) }, 'Versions') : null,
+          h('button', { class: 'btn small', type: 'button', 'data-act': 'edit-addon', title: a.registered ? 'Edit the name and description' : 'Add a name and description record for this add-on', onclick: () => addonForm('edit', a) }, a.registered ? 'Edit' : 'Register'),
+          (() => { const why = ADDON.deleteAddonBlock(a.offered.version);       // Step 2.7: the server refuses an offered add-on; the button says why
+            return h('button', { class: 'btn small danger', type: 'button', 'data-act': 'delete-addon', disabled: !!why, title: why || 'Permanently delete this add-on, all its versions and their package files', onclick: () => deleteAddonDialog(a) }, 'Delete'); })())));
+      box.replaceChildren(h('div', { class: 'toolbar', style: 'margin-bottom:8px' }, h('h3', { style: 'margin:0 auto 0 0' }, 'Add-on manager'),
+        h('button', { class: 'btn small primary', type: 'button', id: 'btn-addon-new', onclick: () => addonForm('create') }, 'New add-on')));
+      box.append(
+        h('p', { class: 'hint', id: 'addon-manager-summary' }, `${sum.total} add-on${sum.total === 1 ? '' : 's'} · ${sum.offered} offered to users · ${sum.notOffered} not offered.`),
+        h('div', { class: 'tablewrap' }, h('table', { id: 'addon-manager-table' }, h('thead', {}, h('tr', {}, ['Add-on', 'Feature key', 'Releases', 'Latest', 'Offered to users', 'Registry', 'Updated', ''].map((x) => h('th', {}, x)))),
+          h('tbody', { id: 'addon-manager-rows' }, list.length ? body : h('tr', {}, h('td', { colspan: '8' }, 'No add-ons yet.'))))),
+        h('p', { class: 'hint' }, 'The MetaZone app only offers add-ons it already knows by id; a record here does not add a new add-on to the app.'));
+      return box;
+    }
+
+    // ---- Step 2.3: version history of one add-on + release selection, on the EXISTING functions only.
+    // History = admin_list_addon_releases(); selection = admin_get_addon_selection() (its `revision` is sent as p_expected_revision, so the
+    // server refuses a change made on stale data: "stale: ..."). Deactivate = admin_withdraw_addon (0014, same revision check).
+    // Step 8: Yank / Restore send the same p_expected_revision (admin_yank_addon, 0017) when a selection exists. Authorization stays on the server
+    // (_require_admin in every function); nothing here decides who may do what. No package download / replacement / deletion in this step.
+    const managedList = managed.ok ? ADDON.describeManagedAddons(managed.data) : [];
+    function historyPanel() {
+      const box = h('div', { class: 'card', id: 'addon-history', style: 'margin-bottom:20px' });
+      const ids = [...new Set(releases.map((r) => r.addon_id))].sort();
+      if (!ids.length) { box.append(h('h3', {}, 'Version history'), h('p', { class: 'hint', id: 'addon-history-empty' }, 'No releases published yet.')); return box; }
+      if (!ids.includes(historyAddon)) historyAddon = ids[0];
+      const nameOf = (id) => { const m = managedList.find((a) => a.id === id); return m ? m.name : ((releases.find((r) => r.addon_id === id) || {}).title || id); };
+      const pick = h('select', { id: 'addon-history-select', 'aria-label': 'Add-on' }, ids.map((id) => h('option', { value: id }, `${nameOf(id)} (${id})`)));
+      pick.value = historyAddon;
+      const body = h('div', { id: 'addon-history-body' });
+      const draw = () => { pick.value = historyAddon; body.replaceChildren(historyBody(historyAddon)); };
+      pick.addEventListener('change', () => { historyAddon = pick.value; draw(); });
+      box.append(h('div', { class: 'toolbar', style: 'margin-bottom:8px' }, h('h3', { style: 'margin:0 auto 0 0' }, 'Version history'), pick), body);
+      box.redraw = draw; draw();
+      return box;
+    }
+    function showHistory(id) { historyAddon = id; const b = document.getElementById('addon-history'); if (b && b.redraw) { b.redraw(); b.scrollIntoView({ block: 'start' }); } }
+
+    function historyBody(id) {
+      const v = ADDON.describeVersionHistory(id, releases, selections, managedList.find((a) => a.id === id) || null), st = v.state, rev = st.revision;
+      const missing0014 = !managed.ok && ADDON.isMissingRpcError(managed.error, 'admin_list_addons');
+      // Run one of the existing functions. A server refusal is shown as it is; a "stale" refusal also reloads the tab so the admin sees
+      // what the other admin did. A function that does not exist on this server (migration not applied) gets a plain explanation.
+      const exec = async (c, okMsg) => {
+        try {
+          await act(async () => {                                          // act() shows the message, so the explanation has to be created inside it
+            try { return await rpc(c.fn, c.params); }
+            catch (e) { if (ADDON.isMissingRpcError(e.message, c.fn)) throw new Error(`${c.fn} is not available on this server: the database migration that adds it has not been applied yet.`); throw e; }
+          }, okMsg);
+        } catch (e) { if (ADDON.isStaleError(e.message)) go('addons'); throw e; }
+        go('addons');
+      };
+      const doRun = (c, okMsg) => async (ev) => { const b = ev.currentTarget; b.disabled = true; try { await exec(c, okMsg); } catch (e) { if (b.isConnected) b.disabled = false; } };
+      const ask = (title, text, label, c, okMsg) => confirmBox(title, text, label, async () => { try { await exec(c, okMsg); } catch (e) { if (ADDON.isStaleError(e.message)) return; throw e; } });
+      const badge = (b) => h('span', { class: 'badge' + (b.kind === 'ok' ? ' ok' : b.kind === 'warn' ? ' suspended' : ''), title: b.title || null, 'data-state': b.label }, b.label);
+      const stateBad = st.warn || st.kind === 'unknown' ? 'suspended' : 'ok';
+
+      const rows = v.rows.map((r) => h('tr', { 'data-version': r.version, 'data-yanked': r.yanked ? '1' : '0', 'data-offered': r.offered ? '1' : '0', 'data-chosen': r.chosen ? '1' : '0' },
+        h('td', {}, h('div', { style: 'min-width:0;overflow-wrap:anywhere' },                      // ONE child, so the phone card layout (flex) keeps it together
+          h('b', {}, r.version), r.channel !== 'stable' ? h('span', { class: 'badge', style: 'margin-left:6px' }, r.channel) : null,
+          r.title && r.title !== v.name ? h('div', { class: 'hint' }, r.title) : null,
+          r.summary ? h('div', { class: 'hint' }, r.summary) : null,
+          r.note ? h('div', { class: 'hint', 'data-role': 'block-reason' }, r.note) : null,
+          r.notes.length ? h('details', {}, h('summary', { class: 'hint' }, 'Release notes'), r.notes.map(([t, lines]) => h('div', {}, h('b', { class: 'hint' }, t), h('ul', {}, lines.map((x) => h('li', {}, x)))))) : null)),
+        h('td', {}, h('span', { class: 'badges', style: 'flex-wrap:wrap' }, r.badges.map(badge))),
+        h('td', {}, String(r.seq)), h('td', {}, ADDON.fmtBytes(r.size)),
+        h('td', {}, h('code', { title: r.sha256 || '' }, ADDON.shortHash(r.sha256))),
+        h('td', {}, fmtShort(r.publishedAt)),
+        h('td', {}, r.minCore || r.maxCore ? `${r.minCore || 'any'} to ${r.maxCore || 'any'}` : 'any'),
+        h('td', { class: 'actions' },
+          r.activate.show ? h('button', { class: 'btn small primary', type: 'button', 'data-act': 'hist-activate', disabled: !!r.activate.block, title: r.activate.block || 'Offer this version to users',
+            onclick: () => ask(`Make ${id} ${r.version} the active version?`,
+              'Apps move to this version (older ones too) the next time they check in, about every 5 minutes, and it starts after their next restart. If a version fails to start, the app keeps its last known good one.', 'Make active',
+              ADDON.selectionCall.activate(id, r.version, rev), `${id} ${r.version} is now active`) }, 'Make active') : null,
+          r.canRestore ? h('button', { class: 'btn small', type: 'button', 'data-act': 'hist-restore', title: 'Make it downloadable again (it does not become active)', onclick: doRun(ADDON.selectionCall.yank(id, r.version, false, rev), `${id} ${r.version} restored`) }, 'Restore')
+            : h('button', { class: 'btn small danger', type: 'button', 'data-act': 'hist-yank', onclick: () => ask(`Yank ${id} ${r.version}?`,
+              'Users can no longer download this release. If it is the ACTIVE version, users are offered nothing until you choose another one (nothing is chosen for you), and apps running it stop it and use their last known good version. The file is kept; Restore never makes it active.', 'Yank',
+              ADDON.selectionCall.yank(id, r.version, true, rev), `${id} ${r.version} yanked`) }, 'Yank'),
+          // Step 2.4: package download (short-lived signed URL, admin session) and replacement (never the active / offered version)
+          h('button', { class: 'btn small', type: 'button', 'data-act': 'hist-download', disabled: !r.storagePath, title: r.storagePath ? 'Download the package file (admin-only link, valid for 60 seconds)' : 'This release has no package path',
+            onclick: (ev) => downloadPackage(id, r, ev.currentTarget) }, 'Download'),
+          h('button', { class: 'btn small', type: 'button', 'data-act': 'hist-replace', disabled: !!(missing0014 || r.replace.block),
+            title: missing0014 ? 'Needs database migration 0014, which has not been applied on this server yet.' : (r.replace.block || 'Replace the package file of this version (not offered to users right now)'),
+            onclick: () => replaceDialog(id, r) }, 'Replace package'),
+          // Step 2.5: delete this version (never the ACTIVE / offered one: the server refuses it, and the button says why)
+          h('button', { class: 'btn small danger', type: 'button', 'data-act': 'hist-delete', disabled: !!(missing0014 || r.del.block),
+            title: missing0014 ? 'Needs database migration 0014, which has not been applied on this server yet.' : (r.del.block || 'Permanently delete this version and its package file'),
+            onclick: () => deleteReleaseDialog(id, r, rev) }, 'Delete'))));
+
+      const c = v.controls;
+      const controls = h('div', { class: 'row', id: 'addon-history-controls' },
+        c.auto.show ? h('button', { class: 'btn small', type: 'button', 'data-act': 'hist-auto', disabled: !!c.auto.block, title: c.auto.block || 'Offer the newest eligible release automatically',
+          onclick: () => ask(`Switch ${id} to Automatic?`, 'Users are offered the newest eligible release, including future ones, as soon as you publish them.', 'Automatic',
+            ADDON.selectionCall.auto(id, rev), `${id}: automatic`) }, 'Automatic (newest)') : null,
+        c.restorePrevious.show ? h('button', { class: 'btn small', type: 'button', 'data-act': 'hist-restore-previous', disabled: !!c.restorePrevious.block, title: c.restorePrevious.block || `Go back to v${c.restorePrevious.version}`,
+          onclick: doRun(ADDON.selectionCall.restorePrevious(id, rev), `${id}: restored previous selection`) }, `Restore previous selection (v${c.restorePrevious.version})`) : null,
+        c.withdraw.show ? h('button', { class: 'btn small danger', type: 'button', 'data-act': 'hist-withdraw', disabled: !!c.withdraw.block || missing0014,
+          title: missing0014 ? 'Needs database migration 0014, which has not been applied on this server yet.' : (c.withdraw.block || 'Offer nothing for this add-on'),
+          onclick: () => ask(`Deactivate ${id}?`,
+            'Users are offered nothing for this add-on: no Install or Update button. No release is yanked or deleted. Copies already installed on PCs are not removed or stopped by this (only Yank stops a version). Offer a version again with Restore previous selection, Make active or Automatic.', 'Deactivate',
+            ADDON.selectionCall.withdraw(id, rev), `${id} deactivated`) }, 'Deactivate') : null);
+
+      return h('div', { 'data-history-for': id },
+        h('p', { style: 'margin:0 0 4px' }, h('b', {}, v.name), ' ', h('code', {}, id), ' — ',
+          h('span', { class: 'badge ' + stateBad, id: 'addon-history-state', 'data-kind': st.kind }, st.label)),
+        h('p', { class: 'hint', id: 'addon-history-counts', style: 'margin:0 0 6px' },
+          `${v.counts.total} release${v.counts.total === 1 ? '' : 's'}` + (v.counts.yanked ? ` · ${v.counts.yanked} yanked` : '') + (v.counts.deleted ? ` · ${v.counts.deleted} deleted (no longer listed)` : '')
+          + (v.featureKey ? ` · feature ${v.featureKey}` : '') + (st.updatedAt ? ` · selection last changed ${fmtShort(st.updatedAt)}${st.updatedBy ? ' by ' + st.updatedBy : ''}` : '')),
+        st.warn ? h('p', { class: 'warn', id: 'addon-history-warn', style: 'margin:0 0 6px' }, st.warn) : null,
+        st.note ? h('p', { class: 'hint', style: 'margin:0 0 6px' }, st.note) : null,
+        controls,
+        h('div', { class: 'tablewrap' }, h('table', { id: 'addon-history-table' }, h('thead', {}, h('tr', {}, ['Version', 'State', 'Seq', 'Size', 'SHA-256', 'Published', 'App versions', ''].map((x) => h('th', {}, x)))),
+          h('tbody', { id: 'addon-history-rows' }, rows))),
+        h('p', { class: 'hint' }, 'Active = chosen by an admin. Offered = what users are offered right now (can be automatic). Yanked = users cannot download it and apps running it stop it. Withdrawn = the add-on is deactivated and nothing is offered.'));
+    }
+
+    // ---- Step 2.4: download one package (admin only). The Storage policy lets only admins read a yanked / not-offered object, and the link is a
+    // signed URL that expires after 60 seconds. Nothing is read into memory here; the browser saves the file.
+    async function downloadPackage(id, r, btn) {
+      btn.disabled = true;
+      try {
+        const name = ADDON.packageFileName(id, r.version);
+        const { data, error } = await sb.storage.from('addons').createSignedUrl(r.storagePath, 60, { download: name });
+        if (error || !data || !data.signedUrl) throw new Error((error && error.message) || 'the server returned no download link');
+        const u = new URL(data.signedUrl, cfg.supabaseUrl);
+        if (u.origin !== new URL(cfg.supabaseUrl).origin) throw new Error('the download link points to an unexpected address, so it was not opened');
+        const a = h('a', { href: u.href, download: name, rel: 'noopener', style: 'display:none' }); document.body.append(a); a.click(); a.remove();
+        toast(`Download of ${name} started (link valid for 60 seconds). Expected SHA-256 starts with ${ADDON.shortHash(r.sha256).replace('…', '')}.`);
+      } catch (e) { toast(`Could not download ${id} ${r.version}: ${e.message}`, true); }
+      finally { if (btn.isConnected) btn.disabled = false; }
+    }
+
+    // ---- Step 2.4: replace the package of ONE release that is neither active nor offered (0014 admin_replace_addon_release).
+    // Order is forced by the backend: (1) check state, (2) keep a copy of what Storage holds now, (3) upload over the same path (admin session;
+    // Storage policy admins only), (4) admin_replace_addon_release records size + SHA-256 (+ expected_sha256 = the hash the admin saw). The
+    // server re-checks "not active / not offered" only in step 4, so if the release became active in between, Storage and the database disagree:
+    // the dialog then offers to upload the saved copy again. Yanked stays yanked (the RPC does not touch it). SQL itself is NOT exercised here.
+    function replaceDialog(id, vr) {
+      const cur = releases.find((x) => x.addon_id === id && x.version === vr.version);
+      if (!cur) return toast('This release is no longer in the list. Refresh the page.', true);
+      const bucket = () => sb.storage.from('addons');
+      const pkgIn = h('input', { type: 'file', id: 'replace-pkg', accept: '.mzaddon,application/zip' });
+      const sideIn = h('input', { type: 'file', id: 'replace-sidecar', accept: '.json,application/json' });
+      const noBackup = h('input', { type: 'checkbox', id: 'replace-no-backup' });
+      const checks = h('div', { id: 'replace-checks' }, h('p', { class: 'hint' }, 'Choose the rebuilt, signed package (.mzaddon) and its release.json.'));
+      const status = h('div', { id: 'replace-status', 'aria-live': 'polite' });
+      const runBtn = h('button', { class: 'btn primary', id: 'btn-replace-run', type: 'button', disabled: true, onclick: () => runReplace() }, 'Replace package');
+      let ready = null, busy = false, inconsistent = false, finished = false, backup = null, ctx = null, token = 0, closeDlg = () => {};
+      const say = (kind, text, actions) => status.replaceChildren(text ? h('div', { class: kind === 'err' ? 'banner' : 'card', 'data-kind': kind, style: 'margin-top:12px' },
+        h('p', { class: kind === 'err' ? 'warn' : '', style: 'margin:0 0 8px' }, text), actions && actions.length ? h('div', { class: 'row' }, actions) : null) : []);
+      const lock = (on) => { pkgIn.disabled = sideIn.disabled = noBackup.disabled = on || inconsistent || finished; runBtn.disabled = on || inconsistent || finished || !ready; };
+      const btn = (label, cls, id, fn) => h('button', { class: 'btn small ' + cls, type: 'button', id, onclick: fn }, label);
+      const canLeave = () => !busy && !inconsistent;
+      const stop = (msg) => { busy = false; lock(false); say('err', msg); toast(msg, true); };     // nothing was changed
+
+      async function check() {
+        const my = ++token; ready = null; runBtn.disabled = true; say();
+        if (!pkgIn.files[0] || !sideIn.files[0]) { checks.replaceChildren(h('p', { class: 'hint' }, 'Choose the rebuilt, signed package (.mzaddon) and its release.json.')); return; }
+        const out = []; let res, buf = null, pkg = null;
+        try { res = ADDON.parseSidecar(await sideIn.files[0].text(), known); } catch (e) { res = { ok: false, errors: ['Could not read release.json: ' + e.message] }; }
+        if (my !== token) return;
+        if (!res.ok) res.errors.forEach((e) => out.push(line(false, e))); else out.push(line(true, 'release.json is valid'));
+        try {
+          buf = await pkgIn.files[0].arrayBuffer();
+          pkg = { name: pkgIn.files[0].name, size: buf.byteLength, head: new Uint8Array(buf.slice(0, 4)), sha256: await ADDON.sha256Hex(buf, window.crypto && window.crypto.subtle) };
+        } catch (e) { out.push(line(false, 'Could not read/hash the package: ' + e.message)); }
+        if (my !== token) return;
+        if (pkg) out.push(line(true, `New package: ${pkg.name}, ${ADDON.fmtBytes(pkg.size)} (${pkg.size} bytes), SHA-256 ${pkg.sha256}`));
+        let cr = { errors: [], warnings: [] };
+        if (res.ok && pkg) {
+          cr = ADDON.checkReplacement(cur, res.release, pkg);
+          if (!cr.errors.length) out.push(line(true, 'The package matches release.json (size and SHA-256) and describes this exact release'));
+          cr.errors.forEach((e) => out.push(line(false, e)));
+          cr.warnings.forEach((w) => out.push(h('li', {}, h('span', { class: 'badge' }, 'Note'), ' ', w)));
+        }
+        checks.replaceChildren(h('ul', { class: 'checks' }, out));
+        if (res.ok && pkg && !cr.errors.length) { ready = { sidecar: res.release, pkg, buf }; runBtn.disabled = false; }
+      }
+      pkgIn.addEventListener('change', check); sideIn.addEventListener('change', check);
+
+      const saveBackup = () => {
+        if (!backup) return;
+        const url = URL.createObjectURL(new Blob([backup.buf], { type: 'application/zip' }));
+        const a = h('a', { href: url, download: `${id}-${vr.version}.previous.mzaddon`, style: 'display:none' }); document.body.append(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+      };
+      const leave = () => btn('Close without fixing', 'danger', 'btn-replace-leave', () => { inconsistent = false; toast(`${id} ${vr.version}: Storage and the database may disagree. Run Replace package again with the same two files to finish it.`, true); closeDlg(); });
+
+      async function restore() {
+        busy = true; lock(true); say('info', 'Uploading the saved previous package again…');
+        let err = null; try { err = (await bucket().upload(ctx.fr.storage_path, backup.buf, { contentType: 'application/zip', upsert: true })).error; } catch (e) { err = e; }
+        busy = false;
+        if (err) return fail('restore', `Could not put the previous package back: ${err.message || err}. Storage still holds the NEW package.`);
+        inconsistent = false; finished = true; lock(false); toast(`${id} ${vr.version}: previous package restored`);
+        say('ok', 'The previous package was uploaded to Storage again (Storage accepted the upload). The database record was never changed, so both describe the previous package again. Nothing was replaced. Close this window; you can start over with a fresh Replace.');
+      }
+      // recovery panel after a failure. kind: upload | stale | in_use | missing | storage | other | unconfirmed | restore
+      function fail(kind, msg) {
+        busy = false; lock(false); toast(msg, true);
+        const acts = [];
+        if (kind === 'upload') acts.push(btn('Retry upload', 'primary', 'btn-replace-retry', () => uploadStep()));
+        else if (kind === 'storage' || kind === 'other' || kind === 'unconfirmed') acts.push(btn('Retry database step', 'primary', 'btn-replace-retry', () => dbStep()));
+        else if (kind === 'stale') acts.push(btn('Reload data', '', 'btn-replace-reload', () => go('addons')));
+        if (backup && kind !== 'stale') acts.push(btn('Restore previous package', kind === 'in_use' || kind === 'missing' || kind === 'restore' ? 'primary' : '', 'btn-replace-restore', () => restore()));
+        if (backup) acts.push(btn('Save a copy of the previous package', '', 'btn-replace-save', saveBackup));
+        acts.push(leave());
+        say('err', msg + (kind === 'upload' ? ' The database was NOT changed.' : ''), acts);
+      }
+
+      async function uploadStep() {
+        busy = true; lock(true); inconsistent = true;                    // from here on Storage may differ from the database
+        say('info', `Step 3 of 4: uploading the new package (${ADDON.fmtBytes(ctx.pkg.size)}) to Storage…`);
+        let err = null; try { err = (await bucket().upload(ctx.fr.storage_path, ctx.buf, { contentType: 'application/zip', upsert: true })).error; } catch (e) { err = e; }
+        if (err) return fail('upload', `Upload failed: ${err.message || err}. The previous package should still be in Storage, but a failed upload cannot be guaranteed to have left it untouched.${backup ? ' “Restore previous package” uploads the saved copy again to be sure.' : ''}`);
+        return dbStep();
+      }
+      async function dbStep() {
+        busy = true; lock(true);
+        say('info', 'Step 4 of 4: saving the new size and SHA-256 in the database…');
+        const call = ADDON.replaceCall(ctx.fr, ctx.pkg); let data;
+        try { data = await rpc(call.fn, call.params); }
+        catch (e) {
+          const k = ADDON.classifyReplaceError(e.message, call.fn), head = 'The new package IS in Storage, but the database was NOT updated: ';
+          if (k === 'missing') return fail('missing', head + `${call.fn} is not available on this server (database migration 0014 has not been applied yet). Put the previous package back.`);
+          if (k === 'stale') return fail('stale', head + `${e.message} Someone else changed this release, so restoring automatically is not offered: reload and check the release first.`);
+          if (k === 'in_use') return fail('in_use', head + `${e.message} Users may now be offered a release whose file no longer matches its recorded SHA-256 and fail to install it: put the previous package back now.`);
+          return fail(k === 'storage' ? 'storage' : 'other', head + `${e.message}. You can retry the database step, or put the previous package back.`);
+        }
+        if (!ADDON.savedReplaceMatches(data, call)) return fail('unconfirmed', 'The new package IS in Storage, but the server did not confirm the new size and SHA-256 in the database. Retry the database step, or put the previous package back.');
+        busy = false; inconsistent = false; finished = true; lock(false);
+        const yankNote = data.yanked === ctx.fr.yanked ? (ctx.fr.yanked ? 'It is still yanked.' : 'It is not yanked.') : `WARNING: the yanked flag is now ${data.yanked}, it was ${ctx.fr.yanked}. Check it in the table.`;
+        toast(`${id} ${vr.version}: package replaced`);
+        say('ok', `Package replaced. ${id} ${vr.version} now has ${ADDON.fmtBytes(ctx.pkg.size)} (${ctx.pkg.size} bytes), SHA-256 ${ctx.pkg.sha256} (before: ${ctx.fr.sha256}). ${yankNote} The server wrote an audit entry. PCs that already installed this version keep the old files; apps still verify the signature and SHA-256 themselves.`);
+        go('addons');
+      }
+
+      async function runReplace() {
+        if (busy || !ready || finished || inconsistent) return;
+        busy = true; lock(true); backup = null; const { sidecar, pkg, buf } = ready;
+        say('info', 'Step 1 of 4: checking the release on the server…');
+        let fr, sel;
+        try {
+          const [rl, sl] = await Promise.all([rpc('admin_list_addon_releases'), rpc('admin_get_addon_selection')]);
+          fr = rl.find((x) => x.addon_id === id && x.version === vr.version); sel = ADDON.selectionFor(sl, id);
+        } catch (e) { return stop('Nothing was changed. Could not read the current state: ' + e.message); }
+        const why = ADDON.replaceEligibility(fr, sel); if (why) return stop('Nothing was changed. ' + why);
+        if (fr.sha256 !== cur.sha256) return stop('Nothing was changed. This release was changed by someone else since this window opened. Close it, refresh the page and start again.');
+        const cr = ADDON.checkReplacement(fr, sidecar, pkg); if (cr.errors.length) return stop('Nothing was changed. ' + cr.errors.join(' '));
+        say('info', 'Step 2 of 4: keeping a copy of the package that is stored now…');
+        let note = null;
+        try {
+          const { data, error } = await bucket().download(fr.storage_path);
+          if (error) throw new Error(error.message || String(error));
+          const b = await data.arrayBuffer(), sha = await ADDON.sha256Hex(b, window.crypto && window.crypto.subtle);
+          if (b.byteLength === fr.size && sha === fr.sha256) backup = { buf: b };
+          else note = `the stored file (${b.byteLength} bytes, SHA-256 ${sha.slice(0, 12)}…) does not match the database record (${fr.size} bytes, ${String(fr.sha256).slice(0, 12)}…)`;
+        } catch (e) { note = 'the stored package could not be read: ' + e.message; }
+        if (!backup && !noBackup.checked) return stop(`Nothing was changed. A restore copy of the current package could not be made (${note}). If you still want to replace it, tick “Replace even if no restore copy can be made” and try again.`);
+        ctx = { fr, pkg, buf };
+        return uploadStep();
+      }
+
+      const body = h('div', { id: 'replace-dialog' },
+        h('p', {}, `Replaces the package file of ${id} ${vr.version} in Storage and records its new size and SHA-256. ` + (cur.yanked ? 'This release is yanked and stays yanked.' : 'Its yanked status does not change.')
+          + ' It only works for a version that is neither the active nor the offered one (the server checks again).'),
+        h('p', { class: 'hint' }, `Now stored: ${ADDON.fmtBytes(cur.size)} (${cur.size} bytes), SHA-256 ${cur.sha256}. Path: ${cur.storage_path}`),
+        h('p', { class: 'hint' }, 'A PC that already installed this version keeps the old files; if that matters, publish a new version instead. The new file is uploaded BEFORE the database is updated; if this version became active in that moment, this window offers to put the saved previous package back.'),
+        h('div', { class: 'field' }, h('label', { for: 'replace-pkg' }, 'New signed package (.mzaddon, a ZIP)'), pkgIn),
+        h('div', { class: 'field' }, h('label', { for: 'replace-sidecar' }, 'Its release.json'), sideIn),
+        h('div', { class: 'field' }, h('label', {}, noBackup, ' Replace even if no restore copy of the current package can be made')),
+        checks, h('div', { class: 'row', style: 'margin-top:12px' }, runBtn), status);
+      closeDlg = modal(`Replace package: ${id} ${vr.version}`, body, [{ label: 'Close', run: (c) => { if (canLeave()) c(); else toast(busy ? 'Wait until the current step has finished.' : 'Storage and the database may disagree: use the buttons in the message, or “Close without fixing”.', true); return true; } }], canLeave);
+    }
+
+    // ---- Step 2.5: delete ONE release (admin_delete_addon_release) or a WHOLE add-on (admin_delete_addon), then clean up Storage.
+    // Order (forced by the backend, section F of 0014): (1) fresh re-check, nothing is written if it fails; (2) the database function, ONE
+    // transaction on the server (tombstone + delete + audit; yanked releases keep their revocation); only when the server CONFIRMS it, (3) the
+    // package file(s) it returned are removed from Storage with the admin's own session. The database function is called AT MOST ONCE per
+    // window: if Storage cleanup fails the retry button repeats ONLY the Storage removal, never the deletion. Only a path that is exactly
+    // the one the server enforces for that release (<id>/<version>/<id>-<version>.mzaddon) is ever sent to Storage. SQL / Storage are NOT
+    // exercised by the browser check (stubbed client).
+    async function storageAbsent(bucket, path) {                       // true = the object is not in the bucket; throws when it cannot be told
+      const i = path.lastIndexOf('/'), dir = path.slice(0, i), name = path.slice(i + 1);
+      const { data, error } = await bucket.list(dir, { limit: 100, search: name });
+      if (error) throw new Error(error.message || String(error));
+      return !(data || []).some((o) => o && o.name === name);
+    }
+    // remove() lists the objects it really deleted; one it could not delete (policy refusal) is just missing from that list, with no error.
+    // So everything not reported as removed is checked, never assumed. Returns {done:[{path,how}], failed:[{path,reason}]}.
+    async function removeFromStorage(paths) {
+      const bucket = sb.storage.from('addons'), done = [], failed = [];
+      let res = null, rerr = null;
+      try { res = await bucket.remove(paths); if (res && res.error) rerr = res.error; } catch (e) { rerr = e; }
+      const rmsg = rerr ? (rerr.message || String(rerr)) : '';
+      const sp = ADDON.splitRemoved(paths, rerr ? [] : (res && res.data));
+      sp.removed.forEach((p) => done.push({ path: p, how: 'removed' }));
+      for (const p of sp.notReported) {
+        try {
+          if (await storageAbsent(bucket, p)) done.push({ path: p, how: 'already absent' });
+          else failed.push({ path: p, reason: rerr ? rmsg : 'Storage did not remove it (the delete was refused or did not happen)' });
+        } catch (e) { failed.push({ path: p, reason: 'could not check whether it still exists: ' + (e.message || e) + (rerr ? ` (remove error: ${rmsg})` : '') }); }
+      }
+      return { done, failed };
+    }
+
+    // c = { title, intro: [nodes], confirm (exact text), confirmLabel, ack (label | null), runLabel, preflight(): null | refusal text, call(typed): {fn, params},
+    //       interpret(data): {ok, paths, rejected, ...}, success(out, cleaned): text, leftoverNote }
+    function deleteDialog(c) {
+      const typed = h('input', { type: 'text', id: 'delete-confirm', autocomplete: 'off', spellcheck: 'false', placeholder: c.confirm, 'aria-label': c.confirmLabel });
+      const ack = c.ack ? h('input', { type: 'checkbox', id: 'delete-ack' }) : null;
+      const status = h('div', { id: 'delete-status', 'aria-live': 'polite' });
+      const runBtn = h('button', { class: 'btn danger', id: 'btn-delete-run', type: 'button', disabled: true, onclick: () => runDelete() }, c.runLabel);
+      let busy = false, dbDone = false, finished = false, left = false, pending = [], cleaned = 0, out = null, closeDlg = () => {};
+      const sync = () => { const lock = busy || dbDone || finished; typed.disabled = lock; if (ack) ack.disabled = lock;
+        runBtn.disabled = lock || !ADDON.confirmMatches(typed.value, c.confirm) || (!!ack && !ack.checked); };
+      typed.addEventListener('input', sync); if (ack) ack.addEventListener('change', sync);
+      const say = (kind, text, actions, extra) => status.replaceChildren(text ? h('div', { class: kind === 'err' ? 'banner' : 'card', 'data-kind': kind, style: 'margin-top:12px' },
+        h('p', { class: kind === 'err' ? 'warn' : '', style: 'margin:0 0 8px' }, text), extra || null, actions && actions.length ? h('div', { class: 'row' }, actions) : null) : []);
+      const btn = (label, cls, id, fn) => h('button', { class: 'btn small ' + cls, type: 'button', id, onclick: fn }, label);
+      const canLeave = () => !busy && !(dbDone && pending.length > 0 && !left);
+      const rejNote = () => (out && out.rejected && out.rejected.length ? ` The server also returned ${out.rejected.length} Storage path(s) that are not the expected path of this ${c.what}; they were NOT sent to Storage: ${out.rejected.join(', ')}.` : '');
+      const stop = (msg) => { busy = false; sync(); say('err', msg); toast(msg, true); };      // nothing was changed
+
+      async function cleanup() {
+        busy = true; sync();
+        say('info', `Step 3 of 3: removing ${pending.length} package file${pending.length === 1 ? '' : 's'} from Storage…`);
+        const res = await removeFromStorage(pending);
+        cleaned += res.done.length; pending = res.failed.map((f) => f.path); busy = false; sync();
+        if (!pending.length) {
+          finished = true; sync();
+          const msg = c.success(out, cleaned) + rejNote();
+          toast(msg.split('. ')[0] + '.'); say('ok', msg); return;
+        }
+        const msg = `The database deletion WAS done and is not repeated, but ${pending.length} package file${pending.length === 1 ? '' : 's'} could not be removed from Storage` + (cleaned ? ` (${cleaned} other file${cleaned === 1 ? ' was' : 's were'} removed)` : '') + '. The files are private (users cannot reach them) but still take space. “Retry Storage clean-up” repeats only the Storage removal.' + rejNote();
+        toast(`${pending.length} package file${pending.length === 1 ? '' : 's'} could not be removed from Storage. Retry the clean-up.`, true);
+        say('err', msg, [
+          btn('Retry Storage clean-up', 'primary', 'btn-delete-retry', () => cleanup()),
+          btn('Copy file paths', '', 'btn-delete-copy', async () => { try { await navigator.clipboard.writeText(pending.join('\n')); toast('File paths copied'); } catch (e) { toast('Could not copy automatically: select the paths in the message and copy them.', true); } }),
+          btn('Close without cleaning up', 'danger', 'btn-delete-leave', () => { left = true; toast(`${pending.length} package file${pending.length === 1 ? ' is' : 's are'} still in Storage (private). Paths: ${pending.join(', ')}`, true); closeDlg(); })],
+        h('ul', { id: 'delete-leftovers' }, res.failed.map((f) => h('li', {}, h('code', {}, f.path), ' — ', f.reason))));
+      }
+
+      async function runDelete() {
+        if (busy || dbDone || finished || runBtn.disabled) return;
+        busy = true; sync(); say('info', 'Step 1 of 3: checking the current state on the server…');
+        let why; try { why = await c.preflight(); } catch (e) { return stop('Nothing was changed. Could not read the current state: ' + e.message); }
+        if (why) return stop('Nothing was changed. ' + why);
+        say('info', 'Step 2 of 3: deleting from the database…');
+        const call = c.call(typed.value); let data;
+        try { data = await rpc(call.fn, call.params); }
+        catch (e) {
+          busy = false; sync();
+          const k = ADDON.classifyDeleteError(e.message, call.fn);
+          const msg = k === 'missing' ? `Nothing was deleted. ${call.fn} is not available on this server: database migration 0014 has not been applied yet.`
+            : k === 'in_use' && call.fn === 'admin_delete_addon' ? ADDON.addonDeleteRefusalText(e.message)
+            : k === 'stale' || k === 'in_use' || k === 'confirm' ? `Nothing was deleted. ${e.message}`
+            : k === 'unknown' ? `The server says it does not know this ${c.what}: ${e.message}. If an earlier attempt did not get an answer, or someone else deleted it, it may be gone: reload the data to see. Storage was not touched.${c.leftoverNote}`
+            : `The server did not confirm the deletion (${e.message}). It may or may not have been deleted. Storage was NOT touched. Reload the data to see what the server has now.${c.leftoverNote}`;
+          toast(msg, true); say('err', msg, [btn('Reload data', '', 'btn-delete-reload', () => go('addons'))]); return;
+        }
+        out = c.interpret(data);
+        if (!out.ok) {
+          busy = false; sync();
+          const msg = `The server answered, but not with a confirmation of this deletion, so Storage was NOT touched. Reload the data to see what the server has now.${c.leftoverNote}`;
+          toast(msg, true); say('err', msg, [btn('Reload data', '', 'btn-delete-reload', () => go('addons'))]); return;
+        }
+        dbDone = true; pending = out.paths.slice(); go('addons');                // the deletion is confirmed: refresh the lists and counts in the background
+        if (!pending.length) { busy = false; finished = true; sync(); const msg = c.success(out, 0) + rejNote(); toast(msg.split('. ')[0] + '.'); say('ok', msg); return; }
+        return cleanup();
+      }
+
+      const body = h('div', { id: 'delete-dialog' }, c.intro,
+        ack ? h('div', { class: 'field' }, h('label', {}, ack, ' ' + c.ack)) : null,
+        h('div', { class: 'field' }, h('label', { for: 'delete-confirm' }, c.confirmLabel), typed),
+        h('div', { class: 'row', style: 'margin-top:12px' }, runBtn), status);
+      closeDlg = modal(c.title, body, [{ label: 'Close', run: (cl) => { if (canLeave()) cl(); else toast(busy ? 'Wait until the current step has finished.' : 'Package files are still in Storage: use Retry Storage clean-up, or “Close without cleaning up”.', true); return true; } }], canLeave);
+    }
+
+    const PC_WARNING = 'Deleting a server package does NOT delete the copies already installed on users’ PCs. Apps keep what they installed; only a YANKED version makes apps stop running it.';
+    function deleteReleaseDialog(id, r, rev) {
+      const where = `${id} ${r.version}`;
+      deleteDialog({
+        what: 'release', title: `Delete version: ${where}`, confirm: r.version, confirmLabel: `Type the version (${r.version}) to confirm`, runLabel: 'Delete this version',
+        leftoverNote: r.storagePath ? ` If the release is gone after reloading, its package file ${r.storagePath} may still be in Storage (private; users cannot reach it).` : '',
+        intro: [
+          h('p', {}, `Permanently deletes the release ${where} (seq ${r.seq}) from the database and then removes its package file from Storage. This cannot be undone.`),
+          h('p', { class: 'warn', id: 'delete-pc-warning' }, PC_WARNING),
+          h('p', {}, r.yanked ? 'This release is yanked. It stays on the revoked list after deletion, so apps that run it are still told to stop it.'
+            : 'This release is NOT yanked, so no revocation is kept: PCs that installed it keep running it. If apps must stop it, Cancel, Yank it first, and delete it afterwards.'),
+          h('p', { class: 'hint' }, `The version number ${r.version} and seq ${r.seq} of ${id} are burnt for good: a new release needs a new version number and a higher seq. The server refuses the ACTIVE version and the version users are offered right now, and writes an audit entry. The database is changed first; if removing the file from Storage fails you can retry that part without deleting again.`),
+          h('p', { class: 'hint' }, `Package file: ${r.storagePath || '(none recorded)'}`)],
+        async preflight() {
+          const [rl, sl] = await Promise.all([rpc('admin_list_addon_releases'), rpc('admin_get_addon_selection')]);
+          const fr = rl.find((x) => x.addon_id === id && x.version === r.version), sel = ADDON.selectionFor(sl, id);
+          const why = ADDON.deleteEligibility(fr, sel); if (why) return why;
+          if (fr.sha256 !== r.sha256) return 'This release was changed since this window opened. Close it, refresh the page and review it again.';
+          if ((sel.revision == null ? null : sel.revision) !== (rev == null ? null : rev)) return 'The selection of this add-on was changed by someone else since this window opened. Close it, refresh the page and review it again.';
+          return null;
+        },
+        call: () => ADDON.deleteReleaseCall(id, r.version, rev),
+        interpret: (data) => { const p = ADDON.parseDeleteReleaseResult(data, id, r.version); return { ok: p.ok, paths: p.path ? [p.path] : [], rejected: p.rejected ? [p.rejected] : [], wasYanked: p.wasYanked, revocationKept: p.revocationKept }; },
+        success: (o, n) => `Deleted ${where}. ` + (o.revocationKept ? 'It was yanked and stays on the revoked list. ' : 'It was not yanked, so no revocation is kept. ')
+          + (o.paths.length ? (n ? 'The package file was removed from Storage. ' : 'The package file is no longer in Storage. ') : 'There was no package file to remove. ')
+          + 'The server wrote an audit entry. Copies already installed on PCs were NOT removed.',
+      });
+    }
+
+    function deleteAddonDialog(a) {
+      const id = a.id, imp = ADDON.addonDeleteImpact(releases.filter((x) => x.addon_id === id));
+      deleteDialog({
+        what: 'add-on', title: `Delete add-on: ${a.name} (${id})`, confirm: id, confirmLabel: `Type the add-on id (${id}) to confirm`, runLabel: 'Delete this add-on',
+        leftoverNote: ` If the add-on is gone after reloading, its package files (folder ${id}/ in the private “addons” bucket) may still be in Storage.`,
+        intro: [
+          h('p', {}, `Permanently deletes the add-on ${id}: its name record, its selection (active / previous / deactivated), and ${imp.total} release record${imp.total === 1 ? '' : 's'}; then removes the package files from Storage. This cannot be undone.`),
+          h('p', { class: 'warn', id: 'delete-pc-warning' }, PC_WARNING),
+          imp.offeredVersion ? h('p', { class: 'warn', id: 'delete-offered-warning' }, ADDON.deleteAddonBlock(imp.offeredVersion)) : null,
+          h('p', {}, imp.total ? `${imp.yanked} of ${imp.total} release${imp.total === 1 ? ' is' : 's are'} yanked and stay on the revoked list. ${imp.notYanked ? `The other ${imp.notYanked} ${imp.notYanked === 1 ? 'is' : 'are'} NOT yanked, so no revocation is kept for ${imp.notYanked === 1 ? 'it' : 'them'}: PCs that installed ${imp.notYanked === 1 ? 'it keeps' : 'them keep'} running ${imp.notYanked === 1 ? 'it' : 'them'}. If apps must stop a version, Cancel and Yank it first.` : ''}` : 'This add-on has no releases, so only its name record is deleted.'),
+          h('p', { class: 'hint' }, `All ${imp.total} version numbers and seqs of ${id} are burnt for good. The feature switch${a.featureKey ? ' ' + a.featureKey : ''} on the Pages tab is not deleted. The server refuses to delete an add-on that users are offered right now (deactivate it first) and writes an audit entry. The database is changed first; if removing files from Storage fails you can retry that part without deleting again.`)],
+        async preflight() {
+          const [rl, ml] = await Promise.all([rpc('admin_list_addon_releases'), rpc('admin_list_addons')]);
+          const mine = rl.filter((x) => x.addon_id === id);
+          if (!mine.length && !ml.some((x) => x.addon_id === id)) return `${id} no longer exists. Close this window and refresh the page.`;
+          const now = ADDON.addonDeleteImpact(mine);
+          if (now.offeredVersion) return ADDON.deleteAddonBlock(now.offeredVersion);         // Step 2.7: do not even ask the server
+          if (JSON.stringify(now) !== JSON.stringify(imp)) return `The releases of ${id} changed since this window opened (now ${now.total} release${now.total === 1 ? '' : 's'}${now.offeredVersion ? ', offered: ' + now.offeredVersion : ''}). Close it, refresh the page and review it again.`;
+          return null;
+        },
+        call: (typedText) => ADDON.deleteAddonCall(id, typedText),
+        interpret: (data) => { const p = ADDON.parseDeleteAddonResult(data, id); return { ok: p.ok, paths: p.paths, rejected: p.rejected, releasesDeleted: p.releasesDeleted, revocationsKept: p.revocationsKept }; },
+        success: (o, n) => `Deleted add-on ${id}: ${o.releasesDeleted == null ? 'its' : o.releasesDeleted} release record${o.releasesDeleted === 1 ? '' : 's'} deleted, ${o.revocationsKept == null ? 'the' : o.revocationsKept} revocation${o.revocationsKept === 1 ? '' : 's'} kept, `
+          + (o.paths.length ? `${n} package file${n === 1 ? '' : 's'} removed from Storage. ` : 'no package files to remove. ') + 'The server wrote an audit entry. Copies already installed on PCs were NOT removed.',
+      });
+    }
+
     // ---- publish form
-    const activateIn = h('input', { type: 'checkbox', id: 'addon-activate', checked: true });
+    const activateIn =h('input', { type: 'checkbox', id: 'addon-activate', checked: true });
     const pkgIn = h('input', { type: 'file', id: 'addon-pkg', accept: '.mzaddon,application/zip' });
     const sideIn = h('input', { type: 'file', id: 'addon-sidecar', accept: '.json,application/json' });
     const checks = h('div', { id: 'addon-checks' });
@@ -671,6 +1320,8 @@
     main.replaceChildren(
       h('div', { class: 'toolbar' }, h('h2', {}, 'Add-ons'), h('button', { class: 'btn small', id: 'btn-addons-refresh', onclick: () => go('addons') }, 'Refresh')),
       h('p', { class: 'hint' }, 'Optional modules the app downloads. Who may download and use each one is set under Pages → Add-on features. Free users see every add-on in the app; locked ones have Download disabled. Publishing a release does not change what users get unless “Make active after publishing” is ticked: the ACTIVE version is the only one offered. You can make an older version active again (rollback).'),
+      managerPanel(),
+      historyPanel(),
       h('div', { id: 'addon-selection' }, selectionPanels()),
       h('div', { class: 'tablewrap' }, h('table', { id: 'addon-releases' }, h('thead', {}, h('tr', {}, ['Add-on', 'Version', 'Seq', 'Size', 'SHA-256', 'Published', 'Feature key', 'State', 'Actions'].map((x) => h('th', {}, x)))),
         releases.length ? rows : h('tbody', {}, h('tr', {}, h('td', { colspan: '9' }, 'No releases published yet.'))))),
