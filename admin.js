@@ -153,9 +153,10 @@
   }
 
   // -------------------------------------------------------------- overview
-  // v0.9.9.6: hierarchy instead of four floating boxes -- KPI strip, then operational panels (generations / Tracker),
-  // then secondary panels (accounts / subscriptions / app versions). Every number comes from admin_overview +
-  // admin_tracker_search_stats; nothing is invented, and no time-series is drawn because the backend returns none.
+  // v0.9.9.6: hierarchy instead of four floating boxes -- KPI strip, then the operational panel (generations),
+  // then secondary panels (accounts / subscriptions / app versions). Every number comes from admin_overview;
+  // nothing is invented, and no time-series is drawn because the backend returns none.
+  // Step 22A: the Adobe Tracker searches panel (admin_tracker_search_stats) was removed; Overview no longer depends on it.
   const stat = (n, l, cls) => h('div', { class: 'stat ' + (cls || '') }, h('div', { class: 'n' }, num(n)), h('div', { class: 'l' }, l));
   const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
   const miniStat = (n, l, cls) => h('div', { class: 'stat ' + (cls || '') }, h('div', { class: 'n' }, num(n)), h('div', { class: 'l' }, l));
@@ -164,7 +165,7 @@
   const panel = (title, aside, ...kids) => h('div', { class: 'panel' }, h('div', { class: 'p-head' }, h('h3', {}, title), aside ? h('span', {}, aside) : null), ...kids);
   async function pageOverview(main) {
     const draw = async () => {
-      const o = await rpc('admin_overview'); const ts = await rpc('admin_tracker_search_stats'); const u = o.users, g = o.generations, s = o.subscriptions, a = o.app;
+      const o = await rpc('admin_overview'); const u = o.users, g = o.generations, s = o.subscriptions, a = o.app;
       const kpi = (n, l, sub, cls) => h('div', { class: 'stat ' + cls }, h('div', { class: 'n' }, num(n)), h('div', { class: 'l' }, l, sub ? [' · ', h('small', {}, sub)] : null));
       const versions = Object.entries(a.users_by_version || {}).sort((x, y) => y[1] - x[1]);
       const vTotal = versions.reduce((t, [, c]) => t + c, 0);
@@ -183,12 +184,7 @@
             h('div', { style: 'height:14px' }),
             h('div', { class: 'split', title: 'Share of all-time generations by plan' }, h('i', { class: 'a', style: `width:${pct(g.free, g.total)}%` }), h('i', { class: 'b', style: `width:${pct(g.premium, g.total)}%` })),
             h('div', { class: 'legend' }, h('span', {}, h('i', { style: 'background:var(--accent)' }), `Free ${num(g.free)}`), h('span', {}, h('i', { style: 'background:var(--warning)' }), `Premium ${num(g.premium)}`),
-              h('span', { class: g.failed ? 'warn' : '' }, h('i', { style: 'background:var(--error)' }), `Failed ${num(g.failed)} (${pct(g.failed, g.total)}%)`)))),
-          panel('Adobe Tracker searches', 'searches started in Tracker only', h('div', { id: 'stats-tracker' },
-            h('div', { class: 'mini' }, miniStat(ts.total, 'Total searches'), miniStat(ts.today, 'Today'), miniStat(ts.week, 'This week'), miniStat(ts.month, 'This month')),
-            h('div', { class: 'bars' }, barRow('Today', ts.today, ts.month, '', num(ts.today)), barRow('This week', ts.week, ts.month, '', num(ts.week)), barRow('This month', ts.month, ts.month, '', num(ts.month))),
-            h('div', { style: 'height:12px' }),
-            h('p', { class: 'hint', style: 'margin:0' }, `${num(ts.users_today)} user(s) searched today. Not generations, not Image-to-Prompt jobs, not Apify usage.`)))),
+              h('span', { class: g.failed ? 'warn' : '' }, h('i', { style: 'background:var(--error)' }), `Failed ${num(g.failed)} (${pct(g.failed, g.total)}%)`))))),
         h('div', { class: 'ov-cols three' },
           panel('Accounts', null, h('div', { class: 'mini' }, miniStat(u.active_today, 'Active today'), miniStat(u.expired_premium, 'Expired premium'), miniStat(u.suspended, 'Suspended'))),
           panel('Subscriptions', null, h('div', { id: 'stats-subs' }, h('div', { class: 'mini' },
@@ -229,7 +225,7 @@
           seg('Status', [['', 'Any status'], ['active', 'Active'], ['suspended', 'Suspended']], (v) => { fStatus = v; })),
         h('button', { class: 'btn small', onclick: () => load(false) }, 'Refresh')),
       h('div', { class: 'tablewrap' }, h('table', { id: 'users-table' }, h('thead', {}, h('tr', {},
-        ['Nickname', 'Email', 'Plan', 'Usage', 'Tracker', 'Last seen', 'Actions'].map((c) => h('th', {}, c)))), rows)),
+        ['Nickname', 'Email', 'Plan', 'Usage', 'Last seen', 'Actions'].map((c) => h('th', {}, c)))), rows)),
       note, h('p', { style: 'margin-top:10px' }, more));
     async function load(append) {
       if (!append) { offset = 0; loaded = 0; rows.replaceChildren(); }
@@ -260,7 +256,6 @@
         h('span', { class: 'badge' + (u.status === 'suspended' ? ' suspended' : '') }, u.status)),
         isPrem && u.premium_expires_at ? h('div', { class: 'meta2' }, h('small', {}, 'Expires ' + fmtDay(u.premium_expires_at))) : null),
       h('td', { class: 'c-usage' }, h('div', { class: 'usage' }, us('Today', u.today), us('Week', u.week), us('Month', u.month), us('Total', u.total))),
-      h('td', { class: 'c-tracker' }, h('div', { class: 'meta2' }, num(u.tracker_searches), h('small', {}, 'searches'))),
       h('td', { class: 'c-seen' }, h('div', { class: 'meta2' }, fmtShort(u.last_seen_at), h('small', {}, u.app_version || '—'))),
       h('td', { class: 'actions c-act' }, h('div', { class: 'uact' },
         h('button', { class: 'btn small gold', 'data-act': 'premium', onclick: () => premiumModal(u, reload) }, isPrem ? 'Extend / edit' : 'Activate'),
@@ -274,7 +269,7 @@
     const typed = h('input', { type: 'text', id: 'del-user-email', placeholder: 'Type the email to confirm', style: 'width:100%', autocomplete: 'off' });
     modal('Delete user permanently', h('div', {},
       h('p', {}, 'You are about to delete: ', h('b', {}, u.email || u.id), u.nickname ? ` (${u.nickname})` : ''),
-      h('p', { class: 'warn' }, 'This removes the account, its plan/subscription, usage history and Tracker search history. It cannot be undone. The person can sign in again later and gets a fresh Free account.'),
+      h('p', { class: 'warn' }, 'This removes the account, its plan/subscription, usage history and other records tied to it. It cannot be undone. The person can sign in again later and gets a fresh Free account.'),
       h('div', { class: 'field' }, h('label', {}, 'Type ', h('b', {}, u.email), ' to confirm'), typed)),
     [{ label: 'Cancel', run: (c) => c() }, { label: 'Delete user', cls: 'danger', run: async (c) => {
       if (typed.value.trim().toLowerCase() !== String(u.email || '').toLowerCase()) { toast('The email does not match — nothing was deleted', true); return true; }
