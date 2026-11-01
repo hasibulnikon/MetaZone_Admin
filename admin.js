@@ -575,7 +575,7 @@
           go('pages');
         } }, h('span', { class: 'dot' + (on ? ' on' : '') }), on ? 'Shown' : 'Hidden');
     };
-    const hints = { tracker: 'Also controls the Adobe Tracker add-on.' };
+    const hints = {};      // Tracker is a normal built-in page (migration 0020); no page needs an extra note
     const pageRow = (p) => h('tr', { 'data-page': p.page_key },
       h('td', {}, p.label, hints[p.page_key] ? h('div', { class: 'hint', 'data-hint': p.page_key }, hints[p.page_key]) : null), h('td', {}, h('code', {}, p.page_key)),
       h('td', { 'data-col': 'free' }, planBtn(p, 'free')),
@@ -1330,33 +1330,190 @@
   }
 
   // ------------------------------------------------------ API configuration
-  // Admin ON/OFF for the Meta Generator providers/models (rows exist only for switched-OFF items). Apify belongs to Adobe Tracker and is NOT here.
-  const AI_CATALOG = [["Gemini", [["Gemini 3.6 Flash", "gemini-3.6-flash"], ["Gemini 3.5 Flash", "gemini-3.5-flash"], ["Gemini 3.5 Flash-Lite", "gemini-3.5-flash-lite"], ["Gemini 3.1 Flash-Lite", "gemini-3.1-flash-lite"], ["Gemini 3 Flash (Preview)", "gemini-3-flash-preview"], ["Gemini 2.5 Flash", "gemini-2.5-flash"], ["Gemini 1.5 Flash", "gemini-1.5-flash"], ["Gemini 1.5 Pro", "gemini-1.5-pro"]]], ["Mistral", [["Pixtral 12B", "pixtral-12b-2409"], ["Pixtral Large", "pixtral-large-2411"]]], ["Groq", [["Qwen 3.6 27B (Vision)", "qwen/qwen3.6-27b"]]], ["Cerebras", [["Llama 3.3 70B", "llama-3.3-70b"], ["Llama 3.1 8B", "llama3.1-8b"]]], ["OpenAI", [["GPT-4o", "gpt-4o"], ["GPT-4o Mini", "gpt-4o-mini"], ["GPT-4.1 Nano", "gpt-4.1-nano"]]], ["OpenRouter", [["Inkling Small (Vision)", "thinkingmachines/inkling-small:free"], ["Ling 3.0 Flash VL", "inclusionai/ling-3.0-flash-vl:free"], ["Inkling (Vision)", "thinkingmachines/inkling:free"], ["Nemotron 3 Nano Omni", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"]]]];   // [provider, [[label, id], ...]] from backend/core/constants.py; the app matches on the ID
+  // The Meta Generator provider / model CATALOGUE (migration 0021). Everything the app offers comes from here: add / rename / remove providers and
+  // models, switch them on or off, and publish the adapter package a provider needs. Switching something off is mirrored into ai_access so older
+  // apps keep honouring it. Apify belongs to Adobe Tracker and is NOT here. Users' API keys are never stored or shown here.
   async function pageAi(main) {
-    const rowsOff = await rpc('admin_list_ai_access');
-    const off = new Set(rowsOff.filter((r) => !r.enabled).map((r) => r.provider + '\u0001' + r.model));
-    const draw = (list) => {
-      const offNow = new Set(list.filter((r) => !r.enabled).map((r) => r.provider + '\u0001' + r.model));
-      const known = new Map(AI_CATALOG.map(([p, m]) => [p, new Map(m.map(([l, i]) => [i, l]))]));
-      list.forEach((r) => { if (!known.has(r.provider)) known.set(r.provider, new Map()); if (r.model && !known.get(r.provider).has(r.model)) known.get(r.provider).set(r.model, r.model); });
-      const sw = (provider, model) => {
-        const on = !offNow.has(provider + '\u0001' + model);
-        return h('button', { class: 'btn small' + (on ? '' : ' danger'), 'data-ai': provider + '|' + model, onclick: async () => {
-          const apply = async () => { draw(await act(() => rpc('admin_set_ai_access', { p_provider: provider, p_model: model, p_enabled: !on }), `${model || provider} turned ${on ? 'off' : 'on'}`)); };
-          if (on && !model) confirmBox(`Turn off ${provider}?`, 'It disappears from Meta Generator for every user and is skipped during generation. Their keys are not touched.', 'Turn off', apply); else apply();
-        } }, on ? 'On' : 'Off');
+    const PL = window.ProviderLogic;
+    const bucket = () => sb.storage.from('ai-providers');
+    let list = await rpc('admin_list_ai_catalog');
+    let jobs = [];
+    const loadJobs = async () => { try { jobs = await rpc('admin_list_ai_force_updates', { p_limit: 30 }); } catch (e) { jobs = []; } };
+    await loadJobs();
+    const reload = async (fn, okMsg) => { const r = await act(fn, okMsg); list = (r && r.catalog) || (Array.isArray(r) ? r : list); draw(); return r; };
+
+    // Force Update: preview first (target, version, size, summary), then an explicit confirmation. The server refuses a push whose confirmation value
+    // is not the one the preview returned, so there is no way to push without having been shown the target.
+    async function forceModal(scope, prov, model) {
+      let pv;
+      try { pv = await act(() => rpc('admin_preview_ai_force_update', { p_scope: scope, p_provider: prov.provider, p_model: model ? model.id : null, p_package_id: null })); } catch (e) { return; }
+      const lines = PL.previewLines(pv);
+      const note = h('input', { id: 'fu-note', class: 'input', placeholder: 'Optional note shown to you in the job list' });
+      modal(scope === 'model' ? `Force update model ${model.id}` : `Force update ${prov.provider}`, h('div', { id: 'fu-preview' },
+        h('p', {}, 'This is a mandatory update, not a notice: every device that is online installs it automatically; offline devices install it as soon as they are back online. API keys and user data are never touched.'),
+        h('table', { class: 'inner-table' }, h('tbody', {}, lines.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', { style: k === 'Warning' ? 'color:#e5a24c' : '' }, String(v)))))),
+        pv.duplicate_job ? h('p', { class: 'hint', id: 'fu-dup' }, 'The same update is already active. Confirming returns that job; nothing is duplicated.') : null,
+        h('div', { class: 'field' }, h('label', {}, 'Note'), note)), [
+        { label: 'Cancel', run: (c) => c() },
+        { label: 'Push force update', cls: 'danger', run: async (c) => {
+          try {
+            const r = await act(() => rpc('admin_push_ai_force_update', { p_scope: scope, p_provider: prov.provider, p_model: model ? model.id : null, p_package_id: null, p_confirm: pv.confirm, p_note: note.value.trim() }),
+              null);
+            toast(r.duplicate ? 'Already active - no duplicate job was created' : 'Force update queued'); jobs = r.jobs || jobs; draw(); c();
+          } catch (e) { return true; }
+        } }]);
+    }
+
+    function targetsModal(j) {
+      const body = h('div', { id: 'fu-targets' }, h('p', { class: 'hint' }, 'Loading…'));
+      modal(`Devices for ${j.provider}${j.model_id ? ' / ' + j.model_id : ''} ${j.version || ''}`, body, [{ label: 'Close', run: (c) => c() }]);
+      rpc('admin_list_ai_force_update_targets', { p_job: j.id, p_status: null, p_limit: 200 }).then((rows) => {
+        body.replaceChildren(rows.length ? h('table', { class: 'inner-table' }, h('thead', {}, h('tr', {}, ['Account', 'Device', 'State', 'Tries', 'Version', 'Updated', 'Reason'].map((x) => h('th', {}, x)))),
+          h('tbody', {}, rows.map((r) => h('tr', {}, h('td', {}, r.user || '—'), h('td', {}, h('code', {}, r.device)), h('td', {}, PL.STATE_LABEL[r.status] || r.status), h('td', {}, r.attempts), h('td', {}, r.version || '—'), h('td', {}, fmtShort(r.updated_at)), h('td', {}, r.error || ''))))) : h('p', {}, 'No device has contacted the server about this update yet.'));
+      }).catch((e) => body.replaceChildren(h('p', { class: 'warn' }, e.message)));
+    }
+
+    function jobsPanel() {
+      const rows = jobs.map((j) => h('tr', { 'data-job': j.id },
+        h('td', {}, h('b', {}, j.provider), j.model_id ? h('div', {}, h('code', {}, j.model_id)) : null),
+        h('td', {}, (j.kind === 'rollback' ? 'Rollback' : j.scope === 'model' ? 'Model update' : 'Package update') + (j.version ? ' ' + j.version : '')),
+        h('td', {}, h('span', { class: 'badge' }, j.status), ' ', h('span', { class: 'hint' }, fmtShort(j.created_at))),
+        h('td', { 'data-counts': '1' }, PL.jobSummary(j), j.last_error ? h('div', { class: 'hint', style: 'color:#e5686b' }, 'Last failure: ' + j.last_error) : null),
+        h('td', { class: 'actions' }, h('button', { class: 'btn small', 'data-act': 'devices', onclick: () => targetsModal(j) }, 'Devices'),
+          PL.canCancelJob(j) ? h('button', { class: 'btn small', 'data-act': 'cancel-job', onclick: () => confirmBox('Cancel this force update?', 'Devices that have not installed it yet stop. Devices that already installed it keep it (use Roll back to undo that).', 'Cancel update', async () => {
+            jobs = await act(() => rpc('admin_cancel_ai_force_update', { p_job: j.id }), 'Cancelled'); draw(); }) }, 'Cancel') : null,
+          PL.canRollbackJob(j) ? h('button', { class: 'btn small danger', 'data-act': 'rollback-job', onclick: () => confirmBox('Roll back this update?', 'Creates a separate rollback job: devices that installed this update go back to their previous copy. Other devices are not changed.', 'Roll back', async () => {
+            const r = await act(() => rpc('admin_rollback_ai_force_update', { p_job: j.id, p_note: '' }), 'Rollback queued'); jobs = r.jobs || jobs; draw(); }) }, 'Roll back') : null)));
+      return h('div', { id: 'fu-jobs' }, h('div', { class: 'toolbar' }, h('h3', {}, 'Force updates'),
+        h('button', { class: 'btn small', id: 'fu-refresh', onclick: async () => { await loadJobs(); draw(); toast('Refreshed'); } }, 'Refresh')),
+        jobs.length ? h('div', { class: 'tablewrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Target', 'Update', 'Job', 'Devices', ''].map((x) => h('th', {}, x)))), h('tbody', {}, rows)))
+          : h('p', { class: 'hint' }, 'No force update has been pushed yet.'));
+    }
+
+    function providerModal(existing) {
+      const f = existing || { provider: '', title: '', enabled: true, hidden: false, vision: true, key_url: '', key_hint: '', validate: '', adapter: 'package', sort_order: (list.length + 1) * 10, failover_order: (list.length + 1) * 10 };
+      const inp = (id, v, ph) => h('input', { id, class: 'input', value: v == null ? '' : v, placeholder: ph || '' });
+      const key = inp('aip-key', f.provider, 'LettersDigits'), title = inp('aip-title', f.title), url = inp('aip-url', f.key_url, 'https://…'), hint = inp('aip-hint', f.key_hint), val = inp('aip-val', f.validate, 'optional');
+      if (existing) key.disabled = true;
+      const vision = h('input', { type: 'checkbox', id: 'aip-vision' }); vision.checked = !!f.vision;
+      const hidden = h('input', { type: 'checkbox', id: 'aip-hidden' }); hidden.checked = !!f.hidden;
+      const adapter = h('select', { id: 'aip-adapter', class: 'input' }, h('option', { value: 'package' }, 'Downloaded package'), h('option', { value: 'builtin' }, 'Built into the app'));
+      adapter.value = f.adapter || 'package';
+      const sort = inp('aip-sort', f.sort_order), fail = inp('aip-fail', f.failover_order);
+      const err = h('p', { class: 'hint', id: 'aip-err', style: 'color:#e5686b' });
+      modal(existing ? `Edit ${f.provider}` : 'Add provider', h('div', {},
+        h('div', { class: 'field' }, h('label', {}, 'Provider key (no spaces; cannot change later)'), key),
+        h('div', { class: 'field' }, h('label', {}, 'Display title'), title),
+        h('div', { class: 'field' }, h('label', {}, 'Where to get a key (link)'), url),
+        h('div', { class: 'field' }, h('label', {}, 'Key hint'), hint),
+        h('div', { class: 'field' }, h('label', {}, 'Key check type (built-in providers only)'), val),
+        h('div', { class: 'field' }, h('label', {}, 'Adapter'), adapter),
+        h('div', { class: 'field' }, h('label', {}, vision, ' Understands images')),
+        h('div', { class: 'field' }, h('label', {}, hidden, ' Hidden (kept in the catalogue, not offered to users)')),
+        h('div', { class: 'field' }, h('label', {}, 'Order in Settings / order tried (smaller first)'), h('div', { class: 'row' }, sort, fail)), err), [
+        { label: 'Cancel', run: (c) => c() },
+        { label: 'Save', cls: 'primary', run: async (c) => {
+          if (!PL.validKey(key.value)) { err.textContent = 'The key must start with a letter and use only letters, digits, . _ - (max 40).'; return true; }
+          if (!title.value.trim()) { err.textContent = 'Enter a display title.'; return true; }
+          try {
+            await reload(() => rpc('admin_upsert_ai_provider', { p_key: key.value.trim(), p_title: title.value.trim(), p_enabled: f.enabled !== false, p_hidden: hidden.checked, p_vision: vision.checked,
+              p_key_url: url.value.trim(), p_key_hint: hint.value.trim(), p_validate_kind: val.value.trim(), p_adapter: adapter.value, p_sort: parseInt(sort.value, 10) || 100, p_failover: parseInt(fail.value, 10) || 100 }), 'Provider saved');
+            c();
+          } catch (e) { return true; }
+        } }]);
+    }
+
+    function modelModal(prov, existing) {
+      const m = existing || { id: '', label: '', enabled: true, sort_order: ((prov.models || []).length + 1) * 10 };
+      const id = h('input', { id: 'aim-id', class: 'input', value: m.id }), label = h('input', { id: 'aim-label', class: 'input', value: m.label }), sort = h('input', { id: 'aim-sort', class: 'input', value: m.sort_order });
+      if (existing) id.disabled = true;
+      const err = h('p', { class: 'hint', style: 'color:#e5686b' });
+      modal(existing ? `Edit model ${m.id}` : `Add model to ${prov.provider}`, h('div', {},
+        h('div', { class: 'field' }, h('label', {}, 'Model ID sent to the provider (cannot change later)'), id),
+        h('div', { class: 'field' }, h('label', {}, 'Name users see'), label),
+        h('div', { class: 'field' }, h('label', {}, 'Order (smaller first)'), sort), err), [
+        { label: 'Cancel', run: (c) => c() },
+        { label: 'Save', cls: 'primary', run: async (c) => {
+          if (!id.value.trim() || !label.value.trim()) { err.textContent = 'Enter the model ID and the name.'; return true; }
+          try { await reload(() => rpc('admin_upsert_ai_model', { p_provider: prov.provider, p_model: id.value.trim(), p_label: label.value.trim(), p_enabled: m.enabled !== false, p_sort: parseInt(sort.value, 10) || 100 }), 'Model saved'); c(); } catch (e) { return true; }
+        } }]);
+    }
+
+    function uploadModal(prov) {
+      const pkgIn = h('input', { type: 'file', id: 'aipk-file', accept: '.mzprovider,.zip' }), repIn = h('input', { type: 'file', id: 'aipk-report', accept: '.json' });
+      const note = h('div', { id: 'aipk-checks' }), title = h('input', { id: 'aipk-title', class: 'input', placeholder: 'Display title, e.g. Gemini adapter' });
+      let state = { buf: null, sha: '', report: null, problems: ['Choose the package and its report.'] };
+      const show = () => { note.replaceChildren(...state.problems.map((x) => h('p', { class: 'hint', style: 'color:#e5686b' }, '✗ ' + x)), state.problems.length ? null : h('p', { class: 'hint', style: 'color:#4caf7d' }, '✓ The package and its report belong together and both passed.')); };
+      const recompute = async () => {
+        const pf = pkgIn.files[0], rf = repIn.files[0];
+        state = { buf: null, sha: '', report: null, problems: [] };
+        if (pf) { state.buf = await pf.arrayBuffer(); state.sha = await PL.sha256Hex(state.buf); }
+        if (rf) { const pr = PL.parseReport(await rf.text()); if (pr.ok) state.report = pr.report; else state.problems.push(...pr.errors); }
+        if (!state.problems.length) state.problems = PL.checkUpload({ provider: prov.provider, size: pf ? pf.size : 0, sha: state.sha, report: state.report });
+        if (state.report && !title.value) title.value = state.report.title || '';
+        show();
       };
+      pkgIn.addEventListener('change', recompute); repIn.addEventListener('change', recompute); show();
+      modal(`Upload package for ${prov.provider}`, h('div', {},
+        h('p', { class: 'hint' }, 'Build and check the package on your computer first:  python3 scripts/provider_pkg.py pack <folder> out.mzprovider  then  … check out.mzprovider --sign (the signing key comes from your secret store, never from a file). That writes out.mzprovider.report.json with the publisher signature; the app refuses a package that is not signed by a trusted key. The report is an attestation from that tool; every user’s app validates the package again before installing it.'),
+        h('div', { class: 'field' }, h('label', {}, 'Package (.mzprovider)'), pkgIn), h('div', { class: 'field' }, h('label', {}, 'Report (.json)'), repIn),
+        h('div', { class: 'field' }, h('label', {}, 'Display title'), title), note), [
+        { label: 'Cancel', run: (c) => c() },
+        { label: 'Upload', cls: 'primary', run: async (c) => {
+          if (state.problems.length || !state.buf) { toast(state.problems[0] || 'Choose the files first.', true); return true; }
+          const path = PL.storagePath(prov.provider, state.sha);
+          const up = await bucket().upload(path, state.buf, { contentType: 'application/zip', upsert: true });
+          if (up.error) { toast('Upload failed: ' + up.error.message, true); return true; }
+          try {
+            await reload(() => rpc('admin_register_ai_package', { p_provider: prov.provider, p_title: title.value.trim() || state.report.title, p_storage_path: path, p_sha256: state.sha, p_size: state.buf.byteLength, p_validation: state.report.validation, p_signature: state.report.signature }), 'Package registered');
+            const row = list.find((x) => x.provider === prov.provider);
+            const k = row && (row.packages || []).find((x) => x.sha256 === state.sha);
+            if (k) await reload(() => rpc('admin_record_ai_package_test', { p_id: k.id, p_report: state.report.test }), 'Test report recorded - you can publish it now');
+            c();
+          } catch (e) { return true; }
+        } }]);
+    }
+
+    function packageRows(prov) {
+      return (prov.packages || []).map((k) => h('tr', { 'data-package': k.id },
+        h('td', {}, h('b', {}, k.title), ' ', k.version ? h('span', { class: 'badge' }, 'v' + k.version) : h('span', { class: 'hint' }, 'no version'), ' ', h('code', {}, k.sha256.slice(0, 12)), ' ', h('span', { class: 'hint' }, PL.fmtSize(k.size) + (k.signed ? ' · signed by ' + (k.signer || '?') : ' · NOT signed'))), h('td', {}, PL.statusLabel(k.status)), h('td', {}, fmtShort(k.created_at)),
+        h('td', { class: 'actions' },
+          PL.canPublish(k) ? h('button', { class: 'btn small primary', 'data-act': 'publish', onclick: () => confirmBox(`Publish ${k.title}?`, 'Users are offered this package the next time they check; nobody’s installed copy changes until they press Update. The previous published package is replaced.', 'Publish', async () => { await reload(() => rpc('admin_publish_ai_package', { p_id: k.id }), 'Published'); }) }, 'Publish') : null,
+          PL.canRetire(k) ? h('button', { class: 'btn small', 'data-act': 'retire', onclick: () => reload(() => rpc('admin_retire_ai_package', { p_id: k.id }), 'Retired') }, 'Retire') : null,
+          PL.canDeletePackage(k) ? h('button', { class: 'btn small danger', 'data-act': 'delpkg', onclick: () => confirmBox('Delete this package?', 'The file is removed from storage. Users who already installed it keep their copy.', 'Delete', async () => {
+            const r = await act(() => rpc('admin_delete_ai_package', { p_id: k.id }), 'Deleted'); if (r && r.storage_path) { try { await bucket().remove([r.storage_path]); } catch (e) { /* the row is gone; an orphaned file is harmless */ } } list = r.catalog || list; draw(); }) }, 'Delete') : null)));
+    }
+
+    function draw() {
       const trs = [];
-      for (const [prov, models] of known) {
-        trs.push(h('tr', { class: 'prov', 'data-provider': prov }, h('td', {}, h('b', {}, prov)), h('td', {}, 'Provider'), h('td', {}, sw(prov, ''))));
-        for (const [m, label] of models) trs.push(h('tr', { 'data-provider': prov, 'data-model': m }, h('td', { style: 'padding-left:28px' }, label, ' ', h('code', {}, m)), h('td', {}, 'Model'),
-          h('td', {}, offNow.has(prov + '\u0001') ? h('span', { class: 'hint' }, 'Provider off') : sw(prov, m))));
+      for (const p of list) {
+        const sw = (on, fn, label) => h('button', { class: 'btn small' + (on ? '' : ' danger'), onclick: fn }, on ? 'On' : 'Off');
+        trs.push(h('tr', { class: 'prov', 'data-provider': p.provider },
+          h('td', {}, h('b', {}, p.title), ' ', h('code', {}, p.provider), p.hidden ? h('span', { class: 'badge', style: 'margin-left:6px' }, 'Hidden') : null, ' ', h('span', { class: 'hint' }, p.adapter === 'package' ? 'package' : 'built in')),
+          h('td', {}, 'Provider'),
+          h('td', {}, sw(p.enabled, () => {
+            const go = () => reload(() => rpc('admin_set_ai_provider_enabled', { p_key: p.provider, p_enabled: !p.enabled }), `${p.provider} turned ${p.enabled ? 'off' : 'on'}`);
+            if (p.enabled) confirmBox(`Turn off ${p.provider}?`, 'It disappears from Meta Generator for every user and is skipped during generation. Their keys and installed packages are not touched.', 'Turn off', go); else go();
+          })),
+          h('td', { class: 'actions' }, h('button', { class: 'btn small', 'data-act': 'edit', onclick: () => providerModal(p) }, 'Edit'), h('button', { class: 'btn small', 'data-act': 'addmodel', onclick: () => modelModal(p) }, '+ Model'),
+            h('button', { class: 'btn small', 'data-act': 'upload', onclick: () => uploadModal(p) }, 'Upload package'),
+            (() => { const why = PL.forceProviderBlocked(p); return h('button', { class: 'btn small danger', 'data-act': 'force-provider', disabled: !!why, title: why || 'Push the published package to every device now', onclick: () => forceModal('provider', p) }, 'Force Update'); })(),
+            PL.canDeleteProvider(p) ? h('button', { class: 'btn small danger', 'data-act': 'delete', onclick: () => confirmBox(`Remove ${p.provider}?`, 'It is removed from the catalogue and from every user’s provider list. Saved keys stay on users’ computers and come back if you add it again.', 'Remove', async () => {
+              const r = await act(() => rpc('admin_delete_ai_provider', { p_key: p.provider }), 'Provider removed'); try { if (r.storage_paths && r.storage_paths.length) await bucket().remove(r.storage_paths); } catch (e) { /* harmless */ } list = r.catalog || list; draw(); }) }, 'Remove') : h('span', { class: 'hint', title: 'Retire its published package first' }, 'has a published package'))));
+        for (const m of p.models || []) trs.push(h('tr', { 'data-provider': p.provider, 'data-model': m.id },
+          h('td', { style: 'padding-left:28px' }, m.label, ' ', h('code', {}, m.id)), h('td', {}, 'Model'),
+          h('td', {}, p.enabled ? h('button', { class: 'btn small' + (m.enabled ? '' : ' danger'), onclick: () => reload(() => rpc('admin_set_ai_model_enabled', { p_provider: p.provider, p_model: m.id, p_enabled: !m.enabled }), `${m.id} turned ${m.enabled ? 'off' : 'on'}`) }, m.enabled ? 'On' : 'Off') : h('span', { class: 'hint' }, 'Provider off')),
+          h('td', { class: 'actions' }, h('button', { class: 'btn small', 'data-act': 'editmodel', onclick: () => modelModal(p, m) }, 'Edit'), h('button', { class: 'btn small danger', 'data-act': 'force-model', title: 'Push this model definition to every device now', onclick: () => forceModal('model', p, m) }, 'Force Update'),
+            h('button', { class: 'btn small danger', 'data-act': 'delmodel', onclick: () => confirmBox(`Remove model ${m.id}?`, 'Users can no longer choose it.', 'Remove', () => reload(() => rpc('admin_delete_ai_model', { p_provider: p.provider, p_model: m.id }), 'Model removed')) }, 'Remove'))));
+        if ((p.packages || []).length) trs.push(h('tr', { 'data-provider': p.provider, class: 'pkgs' }, h('td', { colspan: 4, style: 'padding-left:28px' },
+          h('table', { class: 'inner-table' }, h('thead', {}, h('tr', {}, ['Package', 'State', 'Added', ''].map((x) => h('th', {}, x)))), h('tbody', {}, packageRows(p))))));
       }
-      main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'API Configuration — Meta Generator')),
-        h('p', { class: 'hint' }, 'Decide which Meta Generator providers and models users can use. The app applies this when it starts and on every heartbeat; a switched-off provider/model is hidden and skipped during generation. Adobe Tracker’s Apify keys are separate and not controlled here.'),
-        h('div', { class: 'tablewrap' }, h('table', { id: 'ai-rows' }, h('thead', {}, h('tr', {}, ['Provider / model', 'Level', 'Available'].map((x) => h('th', {}, x)))), h('tbody', {}, trs))));
-    };
-    draw(rowsOff);
+      main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'API Configuration — Meta Generator'), h('button', { class: 'btn primary', id: 'ai-add-provider', onclick: () => providerModal(null) }, '+ Add provider')),
+        h('p', { class: 'hint' }, 'This is the catalogue the app uses: the providers, their models, and which of them are on. The app reads it when it starts and on every heartbeat; a switched-off provider or model is hidden and skipped during generation. Providers that need an adapter package are downloaded by users from Settings → API Manager → Providers. Adobe Tracker’s Apify keys are not part of this page.'),
+        h('div', { class: 'tablewrap' }, h('table', { id: 'ai-rows' }, h('thead', {}, h('tr', {}, ['Provider / model', 'Level', 'Available', ''].map((x) => h('th', {}, x)))), h('tbody', {}, trs))),
+        jobsPanel());
+    }
+    draw();
   }
 
   // ------------------------------------------------------------ app version
