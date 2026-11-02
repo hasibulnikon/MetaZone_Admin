@@ -680,9 +680,10 @@
   // Who may download is NOT decided here: it is the add-on's feature switch under Pages -> Add-on features. A published release is immutable; to
   // change a package publish a new version (higher seq). The app still verifies the signed manifest + SHA-256, so Storage is only transport.
   async function pageAddons(main) {
-    const [releases, pageList, selections, managed] = await Promise.all([rpc('admin_list_addon_releases'), rpc('admin_list_pages'),
+    const [releases, pageList, selections, managed, upcoming] = await Promise.all([rpc('admin_list_addon_releases'), rpc('admin_list_pages'),
       rpc('admin_get_addon_selection').catch(() => []),                    // [] on a server without migration 0013
-      rpc('admin_list_addons').then((data) => ({ ok: true, data }), (e) => ({ ok: false, error: e.message }))]);   // Step 2.1 (0014): never breaks the tab
+      rpc('admin_list_addons').then((data) => ({ ok: true, data }), (e) => ({ ok: false, error: e.message })),   // Step 2.1 (0014): never breaks the tab
+      rpc('admin_list_upcoming_features').then((data) => ({ ok: true, data }), (e) => ({ ok: false, error: e.message }))]);   // v1.0.1 (0024): same rule
     const known = { featureKeys: new Set(pageList.map((p) => p.page_key)) };
     const rows = h('tbody', { id: 'addon-release-rows' }, releases.map((r) => h('tr', { 'data-addon': r.addon_id, 'data-version': r.version, 'data-yanked': r.yanked ? '1' : '0' },
       h('td', {}, h('b', {}, r.title || r.addon_id), h('div', {}, h('code', {}, r.addon_id))),
@@ -1220,6 +1221,61 @@
       });
     }
 
+    // ---- v1.0.1 (migration 0024): Upcoming features notice board. Announcements are plain data; "Release" does NOT upload anything itself: it points the
+    // existing "Publish a new release" form below at the linked add-on id, and the database promotes the announcement inside the publish transaction.
+    let releaseFor = null;                                    // {id, addon_id, title} while the publish form below is releasing an announcement
+    const releaseBanner = h('div', { id: 'upcoming-release-banner' });
+    function drawReleaseBanner() {
+      releaseBanner.replaceChildren(releaseFor ? h('div', { class: 'banner', style: 'margin:0 0 12px' },
+        h('p', { style: 'margin:0 0 6px' }, h('b', {}, `Releasing “${releaseFor.title}”`), ' — the package must be for add-on ', h('code', {}, releaseFor.addon_id),
+          '. Choose its signed .mzaddon and release.json below. When the release is published the announcement leaves Upcoming features and the add-on appears in Add-ons automatically.'),
+        h('button', { class: 'btn small', id: 'btn-upcoming-release-cancel', type: 'button', onclick: () => { releaseFor = null; drawReleaseBanner(); check(); } }, 'Stop releasing this announcement')) : []);
+    }
+    const ADDON_ID_RE = /^[a-z0-9_]{1,32}$/;
+    function upcomingModal(u) {
+      const title = h('input', { type: 'text', id: 'upcoming-title', maxlength: '80', placeholder: 'AI Background Remover', value: u ? u.title : '' });
+      const desc = h('textarea', { id: 'upcoming-desc', maxlength: '400', placeholder: 'One or two sentences users will read.' }, u ? u.description : '');
+      const addon = h('input', { type: 'text', id: 'upcoming-addon', maxlength: '32', placeholder: 'ai_bg_remover  (optional until you release it)', value: u && u.addon_id ? u.addon_id : '' });
+      const sort = h('input', { type: 'number', id: 'upcoming-sort', value: u ? String(u.sort_order) : '100', min: '0', max: '100000' });
+      modal(u ? 'Edit announcement' : 'New upcoming feature', h('div', {},
+        h('div', { class: 'field' }, h('label', {}, 'Title (max 80 characters)'), title),
+        h('div', { class: 'field' }, h('label', {}, 'Description (max 400 characters)'), desc),
+        h('div', { class: 'field' }, h('label', {}, 'Add-on id (lowercase letters, digits, underscore; the id the signed package will use)'), addon),
+        h('div', { class: 'row' }, h('label', { class: 'name' }, 'Order (lower first)'), sort),
+        h('p', { class: 'hint' }, 'New announcements are saved as a draft: users only see it after you press Publish.')),
+      [{ label: 'Cancel', run: (c) => c() }, { label: 'Save', cls: 'primary', run: async (c) => {
+        if (!title.value.trim()) { toast('Write the title first', true); return true; }
+        const id = addon.value.trim();
+        if (id && !ADDON_ID_RE.test(id)) { toast('Add-on id: lowercase letters, digits and underscore only (max 32)', true); return true; }
+        await act(() => rpc('admin_upsert_upcoming_feature', { p_id: u ? u.id : null, p_title: title.value.trim(), p_description: desc.value.trim(), p_addon_id: id || null,
+          p_sort_order: Number(sort.value || 100), p_expected_updated_at: u ? u.updated_at : null }), 'Announcement saved');
+        c(); go('addons'); } }]);
+    }
+    function upcomingPanel() {
+      const box = h('div', { class: 'card', id: 'upcoming-features', style: 'margin-bottom:20px' }, h('h3', {}, 'Upcoming features'));
+      if (!upcoming.ok) { box.append(h('p', { class: 'hint' }, 'Not available on this server yet (apply migration 0024_upcoming_features.sql). ' + upcoming.error)); return box; }
+      const list = upcoming.data;
+      box.append(h('p', { class: 'hint' }, 'The notice board users see under Settings → Add-ons → Upcoming features. Deleting an announcement only removes the announcement — never an add-on or a release. When the linked add-on’s first stable release is published, its announcement is promoted automatically.'),
+        h('div', { class: 'row', style: 'margin-bottom:8px' }, h('button', { class: 'btn primary small', id: 'btn-upcoming-new', type: 'button', onclick: () => upcomingModal(null) }, 'New announcement')));
+      if (!list.length) { box.append(h('p', { class: 'hint', id: 'upcoming-empty' }, 'No announcements yet.')); return box; }
+      const badge = (st) => h('span', { class: 'badge' + (st === 'published' ? ' ok' : st === 'released' ? '' : ' suspended'), 'data-state': st }, st === 'published' ? 'Published' : st === 'released' ? 'Released' : 'Draft');
+      box.append(h('div', { class: 'tablewrap' }, h('table', { id: 'upcoming-table' }, h('thead', {}, h('tr', {}, ['Title', 'Add-on id', 'State', 'Actions'].map((x) => h('th', {}, x)))),
+        h('tbody', {}, list.map((u) => h('tr', { 'data-upcoming': u.id, 'data-status': u.status },
+          h('td', {}, h('b', {}, u.title), u.description ? h('div', { class: 'hint' }, u.description) : null),
+          h('td', {}, u.addon_id ? h('code', {}, u.addon_id) : h('span', { class: 'hint' }, '—'), u.status === 'released' && u.released_version ? h('div', { class: 'hint' }, `released as v${u.released_version}`) : null),
+          h('td', {}, badge(u.status)),
+          h('td', { class: 'actions' },
+            h('button', { class: 'btn small', 'data-act': 'edit', type: 'button', onclick: () => upcomingModal(u) }, 'Edit'),
+            u.status === 'draft' ? h('button', { class: 'btn small primary', 'data-act': 'publish', type: 'button', onclick: async () => { await act(() => rpc('admin_set_upcoming_feature_status', { p_id: u.id, p_status: 'published', p_expected_updated_at: u.updated_at }), 'Published: users can now see it'); go('addons'); } }, 'Publish') : null,
+            u.status === 'published' ? h('button', { class: 'btn small', 'data-act': 'unpublish', type: 'button', onclick: async () => { await act(() => rpc('admin_set_upcoming_feature_status', { p_id: u.id, p_status: 'draft', p_expected_updated_at: u.updated_at }), 'Hidden from users'); go('addons'); } }, 'Unpublish') : null,
+            u.status !== 'released' ? h('button', { class: 'btn small', 'data-act': 'release', type: 'button', disabled: !u.addon_id, title: u.addon_id ? 'Release this add-on through the signed publish form below' : 'Add an add-on id first (Edit)',
+              onclick: () => { releaseFor = { id: u.id, addon_id: u.addon_id, title: u.title }; drawReleaseBanner(); check(); const t = document.getElementById('addon-publish'); if (t && t.scrollIntoView) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }, 'Release…') : null,
+            h('button', { class: 'btn small danger', 'data-act': 'delete', type: 'button', onclick: () => confirmBox(`Delete “${u.title}”?`,
+              'Only this announcement is deleted and it disappears from users’ Upcoming features. Published add-ons and releases are not touched.', 'Delete announcement',
+              async () => { await act(() => rpc('admin_delete_upcoming_feature', { p_id: u.id }), 'Announcement deleted'); go('addons'); }) }, 'Delete'))))))));
+      return box;
+    }
+
     // ---- publish form
     const activateIn =h('input', { type: 'checkbox', id: 'addon-activate', checked: true });
     const pkgIn = h('input', { type: 'file', id: 'addon-pkg', accept: '.mzaddon,application/zip' });
@@ -1252,6 +1308,8 @@
       let errs = [];
       if (res.ok && pkg) {
         errs = ADDON.checkPackage(res.release, pkg).concat(ADDON.conflictsWith(res.release, releases));
+        if (releaseFor && res.release.addon_id !== releaseFor.addon_id) errs.push(`This package is for add-on “${res.release.addon_id}”, but you are releasing “${releaseFor.title}” which is linked to “${releaseFor.addon_id}”. Choose the right package, or press “Stop releasing this announcement”.`);
+        if (releaseFor && res.release.channel !== 'stable') errs.push('An announcement is only promoted by a STABLE release. Publish a stable release for it.');
         if (!errs.length) out.push(line(true, 'The package matches release.json (size and SHA-256), and the version/seq are new'));
         errs.forEach((e) => out.push(line(false, e)));
       }
@@ -1308,25 +1366,27 @@
           activated = true;
         } catch (e) { toast(`Published, but could not make it active: ${e.message}. Use “Make active” in the table.`, true); }
       }
-      busy = false; toast(`${release.addon_id} ${release.version} published${activated ? ' and active' : ''}`);
+      busy = false; toast(`${release.addon_id} ${release.version} published${activated ? ' and active' : ''}${releaseFor && releaseFor.addon_id === release.addon_id ? '. The announcement was promoted to Add-ons.' : ''}`);
       go('addons');
     }
 
     main.replaceChildren(
       h('div', { class: 'toolbar' }, h('h2', {}, 'Add-ons'), h('button', { class: 'btn small', id: 'btn-addons-refresh', onclick: () => go('addons') }, 'Refresh')),
       h('p', { class: 'hint' }, 'Optional modules the app downloads. Who may download and use each one is set under Pages → Add-on features. Free users see every add-on in the app; locked ones have Download disabled. Publishing a release does not change what users get unless “Make active after publishing” is ticked: the ACTIVE version is the only one offered. You can make an older version active again (rollback).'),
+      upcomingPanel(),
       managerPanel(),
       historyPanel(),
       h('div', { id: 'addon-selection' }, selectionPanels()),
       h('div', { class: 'tablewrap' }, h('table', { id: 'addon-releases' }, h('thead', {}, h('tr', {}, ['Add-on', 'Version', 'Seq', 'Size', 'SHA-256', 'Published', 'Feature key', 'State', 'Actions'].map((x) => h('th', {}, x)))),
         releases.length ? rows : h('tbody', {}, h('tr', {}, h('td', { colspan: '9' }, 'No releases published yet.'))))),
-      h('div', { class: 'card', id: 'addon-publish', style: 'margin-top:20px' }, h('h3', {}, 'Publish a new release'),
+      h('div', { class: 'card', id: 'addon-publish', style: 'margin-top:20px' }, h('h3', {}, 'Publish a new release'), releaseBanner,
         h('p', { class: 'hint' }, 'Use the two files your build tool produced. The panel checks that the package is exactly what release.json describes (size and SHA-256 are computed here, in your browser) before anything is uploaded.'),
         h('div', { class: 'field' }, h('label', {}, 'Signed package (.mzaddon, a ZIP)'), pkgIn),
         h('div', { class: 'field' }, h('label', {}, 'Release sidecar (release.json)'), sideIn),
         h('div', { class: 'field' }, h('label', {}, activateIn, ' Make active after publishing (users are offered this version)')),
         checks, preview, h('div', { class: 'row', style: 'margin-top:12px' }, publishBtn), status));
     checks.replaceChildren(h('p', { class: 'hint' }, 'Choose the signed package (.mzaddon) and its release.json from your build tool.'));
+    drawReleaseBanner();
   }
 
   // ------------------------------------------------------ API configuration
