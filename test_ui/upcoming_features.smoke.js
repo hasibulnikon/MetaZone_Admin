@@ -1,4 +1,4 @@
-// v1.0.1 browser smoke test: the REAL admin.js renders the Upcoming features panel against a stubbed Supabase client.
+// v1.0.0 browser smoke test: the REAL admin.js renders the Upcoming features panel against a stubbed Supabase client.
 // Proves rendering, the actions' RPC names/parameters, XSS safety and the "release for announcement" package guard. NOT SQL / RLS / a live project.
 //   NODE_PATH=$(npm root -g) PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers node test_ui/upcoming_features.smoke.js
 'use strict';

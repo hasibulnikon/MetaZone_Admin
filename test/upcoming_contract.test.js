@@ -1,4 +1,4 @@
-// v1.0.1 - STATIC contract between the Admin "Upcoming features" panel (admin.js) and migration 0024. Text only: no database, no network.
+// v1.0.0 - STATIC contract between the Admin "Upcoming features" panel (admin.js) and migration 0024. Text only: no database, no network.
 // Run: node --test test/upcoming_contract.test.js
 'use strict';
 const test = require('node:test');

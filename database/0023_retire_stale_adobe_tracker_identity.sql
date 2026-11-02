@@ -1,4 +1,4 @@
--- 0023 (v1.0.1; app version unchanged): retire the stale 'adobe_tracker' identity. Run AFTER 0001..0022. Forward-only, idempotent, one transaction.
+-- 0023 (v1.0.0; app version unchanged): retire the stale 'adobe_tracker' identity. Run AFTER 0001..0022. Forward-only, idempotent, one transaction.
 --
 -- WHY.  Two ids exist for the same product:
 --     tracker          the REAL built-in Tracker page (page_flags row, restored by 0020).  KEPT, never touched here.
@@ -62,7 +62,7 @@ alter table public.retired_addon_ids enable row level security;
 revoke all on public.retired_addon_ids from public, anon, authenticated;
 
 insert into public.retired_addon_ids(addon_id, reason)
-values ('adobe_tracker', 'Stale duplicate of the built-in Tracker page (page key ''tracker''); retired in v1.0.1 (0023)')
+values ('adobe_tracker', 'Stale duplicate of the built-in Tracker page (page key ''tracker''); retired in v1.0.0 (0023)')
 on conflict (addon_id) do nothing;
 
 -- ====================================================================== C. remove the identity
@@ -112,7 +112,7 @@ end $$;
 
 -- ====================================================================== D. never create it again
 insert into public.retired_page_keys(page_key, reason)
-values ('adobe_tracker', 'Stale duplicate of the built-in Tracker page (key ''tracker''); retired in v1.0.1 (0023)')
+values ('adobe_tracker', 'Stale duplicate of the built-in Tracker page (key ''tracker''); retired in v1.0.0 (0023)')
 on conflict (page_key) do nothing;
 
 create or replace function public._refuse_retired_addon_id() returns trigger

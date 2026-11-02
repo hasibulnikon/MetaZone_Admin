@@ -683,7 +683,7 @@
     const [releases, pageList, selections, managed, upcoming] = await Promise.all([rpc('admin_list_addon_releases'), rpc('admin_list_pages'),
       rpc('admin_get_addon_selection').catch(() => []),                    // [] on a server without migration 0013
       rpc('admin_list_addons').then((data) => ({ ok: true, data }), (e) => ({ ok: false, error: e.message })),   // Step 2.1 (0014): never breaks the tab
-      rpc('admin_list_upcoming_features').then((data) => ({ ok: true, data }), (e) => ({ ok: false, error: e.message }))]);   // v1.0.1 (0024): same rule
+      rpc('admin_list_upcoming_features').then((data) => ({ ok: true, data }), (e) => ({ ok: false, error: e.message }))]);   // v1.0.0 (0024): same rule
     const known = { featureKeys: new Set(pageList.map((p) => p.page_key)) };
     const rows = h('tbody', { id: 'addon-release-rows' }, releases.map((r) => h('tr', { 'data-addon': r.addon_id, 'data-version': r.version, 'data-yanked': r.yanked ? '1' : '0' },
       h('td', {}, h('b', {}, r.title || r.addon_id), h('div', {}, h('code', {}, r.addon_id))),
@@ -1221,7 +1221,7 @@
       });
     }
 
-    // ---- v1.0.1 (migration 0024): Upcoming features notice board. Announcements are plain data; "Release" does NOT upload anything itself: it points the
+    // ---- v1.0.0 (migration 0024): Upcoming features notice board. Announcements are plain data; "Release" does NOT upload anything itself: it points the
     // existing "Publish a new release" form below at the linked add-on id, and the database promotes the announcement inside the publish transaction.
     let releaseFor = null;                                    // {id, addon_id, title} while the publish form below is releasing an announcement
     const releaseBanner = h('div', { id: 'upcoming-release-banner' });

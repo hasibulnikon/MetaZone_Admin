@@ -1,4 +1,4 @@
--- 0024 (v1.0.1; app version unchanged): Admin-managed "Upcoming features" notice board. Run AFTER 0001..0023. Idempotent, one transaction.
+-- 0024 (v1.0.0; app version unchanged): Admin-managed "Upcoming features" notice board. Run AFTER 0001..0023. Idempotent, one transaction.
 --
 -- WHY.  Settings -> Add-ons -> Upcoming features used to be a hard-coded list inside the app (AI BG Remover, AI Image Upscaler). It is now data the
 -- Admin controls: create an announcement (title + description), optionally link it to the id of the add-on it announces, publish / unpublish / edit /
