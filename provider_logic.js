@@ -101,7 +101,27 @@
     return parts.length ? parts.join(' · ') : 'no device has contacted the server yet';
   }
 
-  const api = { JOB_STATES, STATE_LABEL, fmtSize, forceProviderBlocked, previewLines, canCancelJob, canRollbackJob, jobSummary, MAX_UNPACKED_BYTES, statusLabel, sha256Hex, storagePath, parseReport, checkUpload, canTest, canPublish, canRetire, canDeletePackage, canDeleteProvider, effective, validKey, MAX_BYTES };
+  /* ---- Removed Providers & Models (migration 0026) ---- */
+  const norm = (s) => String(s == null ? '' : s).toLowerCase();
+  /** Search box of the Removed list: matches provider title / key, model label / id (case-insensitive). Empty query = everything. */
+  function matchesRemoved(item, query) {
+    const q = norm(query).trim(); if (!q) return true;
+    return [item.title, item.provider, item.provider_title, item.label, item.id].some((v) => norm(v).includes(q));
+  }
+  const filterRemoved = (items, query) => (items || []).filter((x) => matchesRemoved(x, query));
+  /** A new provider / model key that was removed earlier must be restored, not added again (the server refuses it too). */
+  const isRemovedProviderKey = (removed, key) => !!removed && (removed.providers || []).some((p) => p.provider === String(key || '').trim());
+  const isRemovedModelId = (removed, provider, id) => !!removed && (removed.models || []).some((m) => m.provider === provider && m.id === String(id || '').trim());
+  /** What restoring a removed provider brings back: the models removed WITH it come back, models removed on their own stay in the Removed Models tab. */
+  function restoreProviderPlan(p) {
+    const ms = (p && p.models) || [];
+    return { back: ms.filter((m) => m.archived_with_provider).map((m) => m.id), stay: ms.filter((m) => !m.archived_with_provider).map((m) => m.id) };
+  }
+  /** Why a removed model cannot be restored right now (null = it can). A model is restored without changing its provider, so the provider must be active. */
+  const restoreModelBlocked = (m) => (m && m.provider_archived ? `Restore provider ${m.provider} first` : null);
+  const originalStatus = (x) => (x && x.enabled ? 'On' : 'Off');
+
+  const api = { matchesRemoved, filterRemoved, isRemovedProviderKey, isRemovedModelId, restoreProviderPlan, restoreModelBlocked, originalStatus, JOB_STATES, STATE_LABEL, fmtSize, forceProviderBlocked, previewLines, canCancelJob, canRollbackJob, jobSummary, MAX_UNPACKED_BYTES, statusLabel, sha256Hex, storagePath, parseReport, checkUpload, canTest, canPublish, canRetire, canDeletePackage, canDeleteProvider, effective, validKey, MAX_BYTES };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.ProviderLogic = api;
 })(typeof window !== 'undefined' ? window : globalThis);

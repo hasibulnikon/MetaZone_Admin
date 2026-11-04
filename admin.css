@@ -302,3 +302,16 @@ ul.checks { list-style:none; margin:var(--sp-3) 0 0; padding:0; } ul.checks li {
 #addon-publish input[type=file] { width:100%; max-width:520px; }
 #addon-preview ul { margin:4px 0 0; padding-left:18px; color:var(--text-dim); }
 td > .hint { font-size:var(--fs-xs); margin-top:2px; }
+
+/* ---- 7th Edition Part 4: OpenAI-compatible Provider Builder / Model Import (additive; no existing rule changed) ---- */
+.compat-result { padding:2px 0; }
+.compat-bridge, .compat-advanced { margin:var(--sp-3) 0; border:1px solid var(--border-soft); border-radius:var(--radius); padding:8px 10px; }
+.compat-bridge > summary, .compat-advanced > summary { cursor:pointer; font-weight:600; color:var(--text-dim); }
+.compat-bridge .row { gap:6px; flex-wrap:wrap; margin-top:6px; } .compat-bridge .row .input { flex:1 1 180px; min-width:0; }
+.compat-checks { padding:10px 12px; } .compat-checks h3 { margin-bottom:4px; }
+.compat-model-list table { width:100%; } .compat-model-list td { vertical-align:middle; } .compat-model-list td .input { width:100%; min-width:120px; }
+
+/* v1.0.0 Part 8A: API Provider Announcements thumbnails (additive) */
+.ann-thumb { width:36px; height:36px; object-fit:cover; border-radius:6px; border:1px solid var(--border); display:block; }
+.ann-preview { min-width:36px; min-height:36px; display:flex; align-items:center; }
+.ann-preview .ann-thumb { width:56px; height:56px; }

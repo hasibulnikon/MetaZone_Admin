@@ -107,6 +107,7 @@
     notices: 'M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z',
     version: 'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z',
     addons: 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z',
+    apiann: 'M3 11v2h3l5 4V7L6 11H3zm13.5 1c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z',
     menu: 'M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z',
   };
   function icon(id) {
@@ -116,7 +117,7 @@
   const logoImg = (cls, src) => h('img', { class: cls || '', src: src || 'assets/logo/metazone-icon.png', alt: 'MetaZone', width: '64', height: '64' });
   const NAV = [['Dashboard', [['overview', 'Overview'], ['users', 'Users']]],
                ['Plans & access', [['limits', 'Limits & Offers'], ['pages', 'Pages'], ['addons', 'Add-ons'], ['ai', 'API Configuration']]],
-               ['Communication', [['payment', 'Premium payment info'], ['notices', 'Notices'], ['version', 'App version']]]];
+               ['Communication', [['payment', 'Premium payment info'], ['notices', 'Notices'], ['apiann', 'API Provider Announcements'], ['version', 'App version']]]];
   const TABS = NAV.flatMap(([, items]) => items);
   function shell() {
     const nav = h('div', { class: 'nav' }, NAV.map(([group, items]) => [h('div', { class: 'nav-group' }, group),
@@ -148,7 +149,7 @@
     const old = document.getElementById('main');
     const main = h('div', { class: 'main', id: 'main' }, h('div', { class: 'skel' }, h('span', { class: 'spin' }), 'Loading…'));
     old.replaceWith(main);
-    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, addons: pageAddons, ai: pageAi, payment: pagePayment, notices: pageNotices, version: pageVersion }[id];
+    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, addons: pageAddons, ai: pageAi, payment: pagePayment, notices: pageNotices, apiann: pageApiAnn, version: pageVersion }[id];
     page(main).catch((e) => main.replaceChildren(h('p', { class: 'warn' }, 'Error: ' + e.message)));
   }
 
@@ -1232,47 +1233,125 @@
         h('button', { class: 'btn small', id: 'btn-upcoming-release-cancel', type: 'button', onclick: () => { releaseFor = null; drawReleaseBanner(); check(); } }, 'Stop releasing this announcement')) : []);
     }
     const ADDON_ID_RE = /^[a-z0-9_]{1,32}$/;
+    // 0024 has the 6-argument admin_upsert_upcoming_feature; 0030 replaced it with a 7-argument version whose p_image_data is optional (default null = no image).
+    // So p_image_data is sent ONLY when there is an image: a no-image save then works on both schema generations. On 0030 an omitted image clears the stored one
+    // (the function writes image_data = the argument), which is exactly what 'Remove image' means.
+    function upcomingUpsertParams(u, v, image) {
+      const params = { p_id: u ? u.id : null, p_title: v.title, p_description: v.description, p_addon_id: v.addon_id || null,
+        p_sort_order: v.sort_order, p_expected_updated_at: u ? u.updated_at : null };
+      if (image) params.p_image_data = image;
+      return params;
+    }
+    // PostgREST answers PGRST202 / 'Could not find the function ... in the schema cache' (or Postgres 'function ... does not exist') when no overload matches the sent parameter names.
+    function isMissingFunctionError(msg) { return /could not find the function|PGRST202|function\b[^\n]*\bdoes not exist|in the schema cache/i.test(String(msg || '')); }
+    const MIG_0030_IMAGE_MSG = 'Thumbnails need migration 0030_upcoming_features_management.sql, which is not applied on this server. Nothing was saved. Your text and image are still in this form: apply 0030, or press Remove image to save without a thumbnail.';
+    const MIG_0030_FEATURE_MSG = (what) => what + ' needs migration 0030_upcoming_features_management.sql, which is not applied on this server. Nothing was changed.';
+    // ---- Part 8B (migration 0030): the announcement form now has an optional thumbnail (local file picker, re-encoded to a small data: image; no URL field).
     function upcomingModal(u) {
-      const title = h('input', { type: 'text', id: 'upcoming-title', maxlength: '80', placeholder: 'AI Background Remover', value: u ? u.title : '' });
-      const desc = h('textarea', { id: 'upcoming-desc', maxlength: '400', placeholder: 'One or two sentences users will read.' }, u ? u.description : '');
-      const addon = h('input', { type: 'text', id: 'upcoming-addon', maxlength: '32', placeholder: 'ai_bg_remover  (optional until you release it)', value: u && u.addon_id ? u.addon_id : '' });
+      let image = u && u.image_data && ANN_IMG_RE.test(u.image_data) ? u.image_data : null;
+      const title = h('input', { type: 'text', id: 'upcoming-title', maxlength: '80', placeholder: 'Feature name', value: u ? u.title : '' });
+      const desc = h('textarea', { id: 'upcoming-desc', maxlength: '400', placeholder: 'One or two sentences users will read. Plain text only.' }, u ? u.description : '');
+      const addon = h('input', { type: 'text', id: 'upcoming-addon', maxlength: '32', placeholder: 'add-on id (optional until you release it)', value: u && u.addon_id ? u.addon_id : '' });
       const sort = h('input', { type: 'number', id: 'upcoming-sort', value: u ? String(u.sort_order) : '100', min: '0', max: '100000' });
+      const preview = h('div', { class: 'ann-preview', id: 'upcoming-preview' });
+      const drawPreview = () => preview.replaceChildren(image ? h('img', { class: 'ann-thumb', src: image, alt: '' }) : h('span', { class: 'hint' }, 'No image'));
+      drawPreview();
+      const file = h('input', { type: 'file', id: 'upcoming-image', accept: 'image/png,image/jpeg,image/webp' });
+      file.addEventListener('change', async () => {
+        const f = file.files && file.files[0]; if (!f) return;
+        try { image = await annThumb(f); drawPreview(); } catch (e) { toast(e.message, true); file.value = ''; }
+      });
       modal(u ? 'Edit announcement' : 'New upcoming feature', h('div', {},
         h('div', { class: 'field' }, h('label', {}, 'Title (max 80 characters)'), title),
         h('div', { class: 'field' }, h('label', {}, 'Description (max 400 characters)'), desc),
-        h('div', { class: 'field' }, h('label', {}, 'Add-on id (lowercase letters, digits, underscore; the id the signed package will use)'), addon),
-        h('div', { class: 'row' }, h('label', { class: 'name' }, 'Order (lower first)'), sort),
+        h('div', { class: 'field' }, h('label', {}, 'Thumbnail (optional; PNG, JPEG or WebP, shrunk to 128 px and stored inside the announcement)'), file,
+          h('div', { class: 'row', style: 'margin-top:6px' }, preview, h('button', { class: 'btn small', type: 'button', id: 'upcoming-image-clear', onclick: () => { image = null; file.value = ''; drawPreview(); } }, 'Remove image'))),
+        h('div', { class: 'field' }, h('label', {}, 'Add-on id (optional; lowercase letters, digits, underscore; the stable id the signed package will use)'), addon),
+        h('div', { class: 'row' }, h('label', { class: 'name' }, 'Order (lower first; or use the ▲ ▼ buttons in the list)'), sort),
         h('p', { class: 'hint' }, 'New announcements are saved as a draft: users only see it after you press Publish.')),
       [{ label: 'Cancel', run: (c) => c() }, { label: 'Save', cls: 'primary', run: async (c) => {
         if (!title.value.trim()) { toast('Write the title first', true); return true; }
         const id = addon.value.trim();
         if (id && !ADDON_ID_RE.test(id)) { toast('Add-on id: lowercase letters, digits and underscore only (max 32)', true); return true; }
-        await act(() => rpc('admin_upsert_upcoming_feature', { p_id: u ? u.id : null, p_title: title.value.trim(), p_description: desc.value.trim(), p_addon_id: id || null,
-          p_sort_order: Number(sort.value || 100), p_expected_updated_at: u ? u.updated_at : null }), 'Announcement saved');
-        c(); go('addons'); } }]);
+        const params = upcomingUpsertParams(u, { title: title.value.trim(), description: desc.value.trim(), addon_id: id, sort_order: Number(sort.value || 100) }, image);
+        try { await rpc('admin_upsert_upcoming_feature', params); }
+        catch (e) {                                                  // keep the dialog open: the typed values and the chosen image stay so the user can retry
+          if (params.p_image_data && isMissingFunctionError(e.message)) { upcoming0030Missing = true; toast(MIG_0030_IMAGE_MSG, true); }
+          else toast(e.message, true);
+          return true;
+        }
+        toast('Announcement saved'); c(); go('addons'); } }]);
     }
+    let upcoming0030Missing = false;                                // learned from a 'function not found' answer; survives go('addons') redraws
+    let upcomingQuery = '', upcomingFilter = 'all';          // list view state; survives go('addons') redraws within this page session
     function upcomingPanel() {
       const box = h('div', { class: 'card', id: 'upcoming-features', style: 'margin-bottom:20px' }, h('h3', {}, 'Upcoming features'));
       if (!upcoming.ok) { box.append(h('p', { class: 'hint' }, 'Not available on this server yet (apply migration 0024_upcoming_features.sql). ' + upcoming.error)); return box; }
       const list = upcoming.data;
-      box.append(h('p', { class: 'hint' }, 'The notice board users see under Settings → Add-ons → Upcoming features. Deleting an announcement only removes the announcement — never an add-on or a release. When the linked add-on’s first stable release is published, its announcement is promoted automatically.'),
-        h('div', { class: 'row', style: 'margin-bottom:8px' }, h('button', { class: 'btn primary small', id: 'btn-upcoming-new', type: 'button', onclick: () => upcomingModal(null) }, 'New announcement')));
-      if (!list.length) { box.append(h('p', { class: 'hint', id: 'upcoming-empty' }, 'No announcements yet.')); return box; }
-      const badge = (st) => h('span', { class: 'badge' + (st === 'published' ? ' ok' : st === 'released' ? '' : ' suspended'), 'data-state': st }, st === 'published' ? 'Published' : st === 'released' ? 'Released' : 'Draft');
-      box.append(h('div', { class: 'tablewrap' }, h('table', { id: 'upcoming-table' }, h('thead', {}, h('tr', {}, ['Title', 'Add-on id', 'State', 'Actions'].map((x) => h('th', {}, x)))),
-        h('tbody', {}, list.map((u) => h('tr', { 'data-upcoming': u.id, 'data-status': u.status },
-          h('td', {}, h('b', {}, u.title), u.description ? h('div', { class: 'hint' }, u.description) : null),
-          h('td', {}, u.addon_id ? h('code', {}, u.addon_id) : h('span', { class: 'hint' }, '—'), u.status === 'released' && u.released_version ? h('div', { class: 'hint' }, `released as v${u.released_version}`) : null),
-          h('td', {}, badge(u.status)),
-          h('td', { class: 'actions' },
-            h('button', { class: 'btn small', 'data-act': 'edit', type: 'button', onclick: () => upcomingModal(u) }, 'Edit'),
-            u.status === 'draft' ? h('button', { class: 'btn small primary', 'data-act': 'publish', type: 'button', onclick: async () => { await act(() => rpc('admin_set_upcoming_feature_status', { p_id: u.id, p_status: 'published', p_expected_updated_at: u.updated_at }), 'Published: users can now see it'); go('addons'); } }, 'Publish') : null,
-            u.status === 'published' ? h('button', { class: 'btn small', 'data-act': 'unpublish', type: 'button', onclick: async () => { await act(() => rpc('admin_set_upcoming_feature_status', { p_id: u.id, p_status: 'draft', p_expected_updated_at: u.updated_at }), 'Hidden from users'); go('addons'); } }, 'Unpublish') : null,
-            u.status !== 'released' ? h('button', { class: 'btn small', 'data-act': 'release', type: 'button', disabled: !u.addon_id, title: u.addon_id ? 'Release this add-on through the signed publish form below' : 'Add an add-on id first (Edit)',
-              onclick: () => { releaseFor = { id: u.id, addon_id: u.addon_id, title: u.title }; drawReleaseBanner(); check(); const t = document.getElementById('addon-publish'); if (t && t.scrollIntoView) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }, 'Release…') : null,
-            h('button', { class: 'btn small danger', 'data-act': 'delete', type: 'button', onclick: () => confirmBox(`Delete “${u.title}”?`,
-              'Only this announcement is deleted and it disappears from users’ Upcoming features. Published add-ons and releases are not touched.', 'Delete announcement',
-              async () => { await act(() => rpc('admin_delete_upcoming_feature', { p_id: u.id }), 'Announcement deleted'); go('addons'); }) }, 'Delete'))))))));
+      // Schema generation: 0030 added archived_at to every row, so rows reveal it. An EMPTY list reveals nothing -> 'unknown' (never guessed).
+      const schema = list.length ? (list.every((r) => r && typeof r === 'object' && 'archived_at' in r) ? '0030' : '0024') : 'unknown';
+      const needs0030 = schema === '0024' || (upcoming0030Missing && schema !== '0030');   // true only when 0030 is KNOWN to be missing
+      box.append(h('p', { class: 'hint' }, 'The notice board users see under Settings → Add-ons → Upcoming features. Only Published, non-archived announcements are shown, in the order below. Deleting an announcement only removes the announcement — never an add-on or a release. Announcements are separate from add-on packages and releases.'),
+        needs0030 ? h('p', { class: 'warn', id: 'upcoming-needs-0030' }, 'Thumbnails, Archive / Restore and the ▲ ▼ reorder buttons need migration 0030_upcoming_features_management.sql (not applied on this server). Creating and editing announcements without an image, publishing, deleting, and typing the Order number all work with 0024.') : null,
+        !needs0030 && schema === 'unknown' ? h('p', { class: 'hint', id: 'upcoming-schema-unknown' }, 'No announcements yet, so this server\'s schema cannot be detected. Announcements without an image save normally; thumbnails, Archive / Restore and ▲ ▼ reorder need migration 0030_upcoming_features_management.sql.') : null,
+        h('div', { class: 'row', style: 'margin-bottom:8px; gap:8px; flex-wrap:wrap' },
+          h('button', { class: 'btn primary small', id: 'btn-upcoming-new', type: 'button', onclick: () => upcomingModal(null) }, 'New announcement'),
+          h('input', { type: 'search', id: 'upcoming-search', placeholder: 'Search title, text or add-on id', value: upcomingQuery, style: 'max-width:260px',
+            oninput: (ev) => { upcomingQuery = ev.target.value; drawRows(); } }),
+          ...[['all', 'All'], ['published', 'Published'], ['draft', 'Unpublished'], ['archived', 'Archived']].map(([k, lbl]) =>
+            h('button', { class: 'btn small' + (upcomingFilter === k ? ' primary' : ''), type: 'button', 'data-filter': k, onclick: () => { upcomingFilter = k; drawRows(); drawChips(); } }, lbl))));
+      const chipsHost = box.querySelectorAll('[data-filter]');
+      function drawChips() { chipsHost.forEach((b) => b.classList.toggle('primary', b.getAttribute('data-filter') === upcomingFilter)); }
+      const holder = h('div', { id: 'upcoming-list' });
+      box.append(holder);
+      const isArch = (u) => !!u.archived_at;
+      const stateOf = (u) => isArch(u) ? 'archived' : u.status;
+      const badge = (u) => { const st = stateOf(u);
+        return h('span', { class: 'badge' + (st === 'published' ? ' ok' : st === 'released' ? '' : ' suspended'), 'data-state': st }, st === 'published' ? 'Published' : st === 'released' ? 'Released' : st === 'archived' ? 'Archived' : 'Unpublished'); };
+      async function move(u, dir) {                                   // reorder among the NON-archived, non-released rows in the current order
+        const ids = list.filter((x) => !isArch(x) && x.status !== 'released').map((x) => x.id);
+        const i = ids.indexOf(u.id), j = i + dir; if (i < 0 || j < 0 || j >= ids.length) return;
+        [ids[i], ids[j]] = [ids[j], ids[i]];
+        try { await rpc('admin_reorder_upcoming_features', { p_ids: ids }); }
+        catch (e) { if (isMissingFunctionError(e.message)) { upcoming0030Missing = true; toast(MIG_0030_FEATURE_MSG('Reordering with ▲ ▼'), true); go('addons'); return; } toast(e.message, true); return; }
+        toast('Order saved'); go('addons');
+      }
+      function drawRows() {
+        const q = upcomingQuery.trim().toLowerCase();
+        const shown = list.filter((u) => {
+          const st = stateOf(u);
+          if (upcomingFilter === 'published' && st !== 'published') return false;
+          if (upcomingFilter === 'draft' && st !== 'draft') return false;
+          if (upcomingFilter === 'archived' && st !== 'archived') return false;
+          return !q || (u.title + ' ' + (u.description || '') + ' ' + (u.addon_id || '')).toLowerCase().includes(q);
+        });
+        if (!list.length) { holder.replaceChildren(h('p', { class: 'hint', id: 'upcoming-empty' }, 'No announcements yet.')); return; }
+        if (!shown.length) { holder.replaceChildren(h('p', { class: 'hint', id: 'upcoming-nomatch' }, 'No announcement matches this search / filter.')); return; }
+        holder.replaceChildren(h('div', { class: 'tablewrap' }, h('table', { id: 'upcoming-table' }, h('thead', {}, h('tr', {}, ['', 'Title', 'Add-on id', 'Order', 'State', 'Actions'].map((x) => h('th', {}, x)))),
+          h('tbody', {}, shown.map((u) => { const movable = !needs0030 && !isArch(u) && u.status !== 'released';
+            return h('tr', { 'data-upcoming': u.id, 'data-status': u.status, 'data-archived': isArch(u) ? '1' : '0' },
+            h('td', {}, u.image_data && ANN_IMG_RE.test(u.image_data) ? h('img', { class: 'ann-thumb', src: u.image_data, alt: '' }) : null),
+            h('td', {}, h('b', {}, u.title), u.description ? h('div', { class: 'hint' }, u.description) : null, h('div', { class: 'hint' }, 'Updated ' + fmtShort(u.updated_at))),
+            h('td', {}, u.addon_id ? h('code', {}, u.addon_id) : h('span', { class: 'hint' }, '—'), u.status === 'released' && u.released_version ? h('div', { class: 'hint' }, `released as v${u.released_version}`) : null),
+            h('td', {}, String(u.sort_order),
+              movable ? h('span', {}, ' ', h('button', { class: 'btn small', 'data-act': 'up', type: 'button', title: 'Show earlier', onclick: () => move(u, -1) }, '▲'),
+                ' ', h('button', { class: 'btn small', 'data-act': 'down', type: 'button', title: 'Show later', onclick: () => move(u, 1) }, '▼')) : null),
+            h('td', {}, badge(u)),
+            h('td', { class: 'actions' },
+              h('button', { class: 'btn small', 'data-act': 'edit', type: 'button', onclick: () => upcomingModal(u) }, 'Edit'),
+              u.status === 'draft' && !isArch(u) ? h('button', { class: 'btn small primary', 'data-act': 'publish', type: 'button', onclick: async () => { await act(() => rpc('admin_set_upcoming_feature_status', { p_id: u.id, p_status: 'published', p_expected_updated_at: u.updated_at }), 'Published: users can now see it'); go('addons'); } }, 'Publish') : null,
+              u.status === 'published' ? h('button', { class: 'btn small', 'data-act': 'unpublish', type: 'button', onclick: async () => { await act(() => rpc('admin_set_upcoming_feature_status', { p_id: u.id, p_status: 'draft', p_expected_updated_at: u.updated_at }), 'Hidden from users'); go('addons'); } }, 'Unpublish') : null,
+              !needs0030 && u.status !== 'released' && !isArch(u) ? h('button', { class: 'btn small', 'data-act': 'archive', type: 'button', onclick: () => confirmBox(`Archive “${u.title}”?`, 'It is hidden from users (and unpublished) and moved to the Archived list. You can restore it later as an unpublished draft.', 'Archive',
+                async () => { try { await rpc('admin_set_upcoming_feature_archived', { p_id: u.id, p_archived: true, p_expected_updated_at: u.updated_at }); } catch (e) { if (isMissingFunctionError(e.message)) { upcoming0030Missing = true; toast(MIG_0030_FEATURE_MSG('Archive'), true); go('addons'); return; } toast(e.message, true); throw e; } toast('Archived'); go('addons'); }) }, 'Archive') : null,
+              !needs0030 && isArch(u) ? h('button', { class: 'btn small', 'data-act': 'restore', type: 'button', onclick: async () => { try { await rpc('admin_set_upcoming_feature_archived', { p_id: u.id, p_archived: false, p_expected_updated_at: u.updated_at }); } catch (e) { if (isMissingFunctionError(e.message)) { upcoming0030Missing = true; toast(MIG_0030_FEATURE_MSG('Restore'), true); go('addons'); return; } toast(e.message, true); return; } toast('Restored as an unpublished draft'); go('addons'); } }, 'Restore') : null,
+              u.status !== 'released' && !isArch(u) ? h('button', { class: 'btn small', 'data-act': 'release', type: 'button', disabled: !u.addon_id, title: u.addon_id ? 'Release this add-on through the signed publish form below' : 'Add an add-on id first (Edit)',
+                onclick: () => { releaseFor = { id: u.id, addon_id: u.addon_id, title: u.title }; drawReleaseBanner(); check(); const t = document.getElementById('addon-publish'); if (t && t.scrollIntoView) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }, 'Release…') : null,
+              h('button', { class: 'btn small danger', 'data-act': 'delete', type: 'button', onclick: () => confirmBox(`Delete “${u.title}”?`,
+                'Only this announcement is deleted and it disappears from users’ Upcoming features. Published add-ons and releases are not touched.', 'Delete announcement',
+                async () => { await act(() => rpc('admin_delete_upcoming_feature', { p_id: u.id }), 'Announcement deleted'); go('addons'); }) }, 'Delete')));
+          })))));
+      }
+      drawRows();
       return box;
     }
 
@@ -1397,10 +1476,43 @@
     const PL = window.ProviderLogic;
     const bucket = () => sb.storage.from('ai-providers');
     let list = await rpc('admin_list_ai_catalog');
+    // Removed Providers & Models (migration 0026): "Remove" ARCHIVES (nothing is deleted) and the archive stays restorable forever. If the server does not
+    // have 0026 yet the list cannot load: then every Remove button is disabled, so no older delete path can be used by accident.
+    let removed = { providers: [], models: [] }, archiveReady = true, rmTab = 'providers', rmQuery = '';
+    const loadRemoved = async () => { try { removed = await rpc('admin_list_removed_ai_catalog'); archiveReady = true; } catch (e) { removed = { providers: [], models: [] }; archiveReady = false; } };
+    await loadRemoved();
     let jobs = [];
     const loadJobs = async () => { try { jobs = await rpc('admin_list_ai_force_updates', { p_limit: 30 }); } catch (e) { jobs = []; } };
     await loadJobs();
-    const reload = async (fn, okMsg) => { const r = await act(fn, okMsg); list = (r && r.catalog) || (Array.isArray(r) ? r : list); draw(); return r; };
+    const reload = async (fn, okMsg) => { const r = await act(fn, okMsg); list = (r && r.catalog) || (Array.isArray(r) ? r : list); if (r && r.removed) removed = r.removed; draw(); return r; };
+
+    // Restore Default Providers (v1.0.0, 7th Edition): puts back ORIGINAL default providers / models that were deleted. The server function only INSERTS
+    // what is missing (ON CONFLICT DO NOTHING): nothing that exists is changed, re-enabled or removed, and no user's API key is involved.
+    const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    function restoreSummary(r) {
+      const np = Number(r && r.restored_providers) || 0, nm = Number(r && r.restored_models) || 0;
+      const provs = (r && r.providers) || [], models = (r && r.models) || [];
+      const body = np + nm === 0
+        ? h('p', { id: 'ai-restore-summary' }, 'Nothing to restore: every default provider and model is already in the catalogue. Nothing was changed.')
+        : h('div', { id: 'ai-restore-summary' },
+          h('p', {}, `Restored ${plural(np, 'provider', 'providers')} and ${plural(nm, 'model', 'models')}.`),
+          provs.length ? h('p', { class: 'hint' }, 'Providers: ' + provs.join(', ')) : null,
+          models.length ? h('p', { class: 'hint' }, 'Models: ' + models.map((m) => `${m.provider} / ${m.model}`).join(', ')) : null,
+          h('p', { class: 'hint' }, 'Existing providers and models were not changed.'));
+      modal('Default providers restored', body, [{ label: 'OK', cls: 'primary', run: (c) => c() }]);
+    }
+    function restoreDefaults() {
+      modal('Restore default providers?', h('div', {},
+        h('p', {}, 'The original default providers (OpenRouter, Gemini, Mistral, Groq, Cerebras, OpenAI, Claude, Grok) and their default models that are missing from this catalogue will be added back, with their original settings.'),
+        h('p', {}, 'Providers and models that already exist stay exactly as they are: nothing is overwritten, re-enabled or removed, and custom providers, custom models and provider packages are untouched. Default models you removed from a provider that still exists are added back too.'),
+        h('p', { class: 'hint' }, 'Safe to repeat: it never creates duplicates. Users’ API keys are not involved.')), [
+        { label: 'Cancel', run: (c) => c() },
+        { label: 'Restore', cls: 'primary', run: async (c) => {
+          const r = await act(() => rpc('admin_restore_default_ai_catalog'));
+          if (r && Array.isArray(r.catalog)) list = r.catalog; else { try { list = await rpc('admin_list_ai_catalog'); } catch (e) { /* keep what is shown */ } }
+          c(); draw(); restoreSummary(r);
+        } }]);
+    }
 
     // Force Update: preview first (target, version, size, summary), then an explicit confirmation. The server refuses a push whose confirmation value
     // is not the one the preview returned, so there is no way to push without having been shown the target.
@@ -1450,52 +1562,323 @@
           : h('p', { class: 'hint' }, 'No force update has been pushed yet.'));
     }
 
-    function providerModal(existing) {
-      const f = existing || { provider: '', title: '', enabled: true, hidden: false, vision: true, key_url: '', key_hint: '', validate: '', adapter: 'package', sort_order: (list.length + 1) * 10, failover_order: (list.length + 1) * 10 };
+    // ============ OpenAI-compatible Provider Builder + Model Import (v1.0.0, 7th Edition Part 4) ============
+    // The provider settings are saved with admin_upsert_ai_openai_provider (0027) and models are imported with admin_import_ai_models (0028, insert-only).
+    // The checks run the Part 3 Python runtime through the LOCAL BRIDGE (scripts/provider_bridge.py); this page never calls a provider itself.
+    // The provider API key is typed into a password box, sent to the bridge in ONE request and dropped: it is never stored, logged or sent to Supabase.
+    const CL = window.CompatLogic;
+    const bridge = CL.makeBridge();
+    const providerExists = (k) => list.find((x) => x.provider === String(k || '').trim());
+    const compatProviders = () => list.filter(CL.isCompat);
+    const applyCatalog = (r) => { list = (r && r.catalog) || (Array.isArray(r) ? r : list); if (r && r.removed) removed = r.removed; draw(); };
+    const sel = (id, options, value) => { const s = h('select', { id, class: 'input' }, options.map(([v, t]) => h('option', { value: v }, t))); s.value = value; return s; };
+    const colorOf = (ok) => (ok === true ? '#4caf7d' : ok === false ? '#e5686b' : '#9aa0aa');
+
+    /** One result of a bridge check -> DOM. Failures say WHAT kind of problem it is (CompatLogic.explainFailure) and never contain the key. */
+    function resultNode(label, r) {
+      const box = h('div', { class: 'compat-result', style: 'margin:6px 0' });
+      if (r && Array.isArray(r.stages)) {                                  // run_checks report
+        for (const s of r.stages) box.append(resultNode(CL.stageLabel(s.name), Object.assign({ stage: s.name }, s)));
+        box.append(h('div', { style: 'font-weight:600;color:' + colorOf(r.ok) }, r.ok ? '✓ All checks passed' : '✗ The checks stopped at the first failure'));
+        return box;
+      }
+      if (r && r.skipped) { box.append(h('div', { style: 'color:' + colorOf(null) }, `– ${label}: skipped`), h('div', { class: 'hint' }, r.detail || '')); return box; }
+      if (r && r.ok === true) {
+        const bits = [];
+        if (r.http_status) bits.push('HTTP ' + r.http_status);
+        if (r.latency_ms != null) bits.push(r.latency_ms + ' ms');
+        if (r.count != null) bits.push(r.count + ' models');
+        if (r.supports_model_list === false) bits.push('no models endpoint');
+        if (r.model) bits.push(r.model + (r.with_image ? ' (with image)' : ''));
+        box.append(h('div', { style: 'color:' + colorOf(true) }, `✓ ${label} — OK`), bits.length ? h('div', { class: 'hint' }, bits.join(' · ')) : null,
+          r.reply_preview ? h('div', { class: 'hint' }, 'Reply: ' + r.reply_preview) : null,
+          r.urls ? h('div', { class: 'hint' }, 'Chat: ' + r.urls.chat + (r.urls.models ? ' · Models: ' + r.urls.models : '')) : null,
+          r.detail ? h('div', { class: 'hint' }, r.detail) : null, r.note ? h('div', { class: 'hint' }, r.note) : null);
+        for (const w of r.warnings || []) box.append(h('div', { class: 'hint', style: 'color:#e5a24c' }, '! ' + w));
+        return box;
+      }
+      const ex = CL.explainFailure(r);
+      box.append(h('div', { style: 'color:' + colorOf(false) }, `✗ ${label} — ${ex.category}`), h('div', { class: 'hint' }, ex.advice));
+      if (r && r.error && r.error !== ex.advice && !r.bridgeDown && r.stage !== 'config') box.append(h('div', { class: 'hint' }, 'Details: ' + r.error));
+      return box;
+    }
+
+    /** Connection box for the local bridge (shared by the provider dialog and the import dialog; address and code are kept in memory for this Admin session). */
+    function bridgePanel() {
+      const url = h('input', { class: 'input', id: 'br-url', value: bridge.state.url, 'aria-label': 'Bridge address' });
+      const tok = h('input', { class: 'input', id: 'br-token', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'Access code from the bridge window', value: bridge.state.token, 'aria-label': 'Bridge access code' });
+      const status = h('span', { class: 'hint', id: 'br-status' }, bridge.state.token ? 'Not checked yet.' : 'Not connected.');
+      const ensure = () => bridge.configure(url.value, tok.value);
+      const btn = h('button', { class: 'btn small', type: 'button', id: 'br-connect', onclick: async () => {
+        ensure(); btn.disabled = true; status.style.color = ''; status.textContent = 'Connecting…';
+        const r = await bridge.health(); btn.disabled = false;
+        status.style.color = colorOf(!!r.ok); status.textContent = r.ok ? '✓ Connected to the local bridge.' : '✗ ' + r.error;
+      } }, 'Connect');
+      const el = h('details', { class: 'compat-bridge', open: !bridge.state.token },
+        h('summary', {}, 'Local bridge (needed for the checks and the model list)'),
+        h('p', { class: 'hint' }, 'The checks run the same Python code as the app, on this computer. ' + CL.START_HELP + ' The API key you type below goes only to this bridge for one check; it is not saved.'),
+        h('div', { class: 'row' }, url, tok, btn), status);
+      return { el, ensure };
+    }
+
+    // ------------------------------------------------------------------ add / edit a provider (Built-in, OpenAI-Compatible or Downloaded Package)
+    function providerModal(existing, startAdapter) {
+      const f = existing || { provider: '', title: '', enabled: true, hidden: false, vision: true, key_url: '', key_hint: '', validate: '', adapter: startAdapter || 'openai_compat', sort_order: (list.length + 1) * 10, failover_order: (list.length + 1) * 10 };
       const inp = (id, v, ph) => h('input', { id, class: 'input', value: v == null ? '' : v, placeholder: ph || '' });
       const key = inp('aip-key', f.provider, 'LettersDigits'), title = inp('aip-title', f.title), url = inp('aip-url', f.key_url, 'https://…'), hint = inp('aip-hint', f.key_hint), val = inp('aip-val', f.validate, 'optional');
       if (existing) key.disabled = true;
       const vision = h('input', { type: 'checkbox', id: 'aip-vision' }); vision.checked = !!f.vision;
       const hidden = h('input', { type: 'checkbox', id: 'aip-hidden' }); hidden.checked = !!f.hidden;
-      const adapter = h('select', { id: 'aip-adapter', class: 'input' }, h('option', { value: 'package' }, 'Downloaded package'), h('option', { value: 'builtin' }, 'Built into the app'));
+      const enabled = h('input', { type: 'checkbox', id: 'aip-enabled' }); enabled.checked = f.enabled !== false;
+      const adapter = h('select', { id: 'aip-adapter', class: 'input' },
+        h('option', { value: 'openai_compat' }, 'OpenAI-Compatible (no package needed)'), h('option', { value: 'package' }, 'Downloaded Package'), h('option', { value: 'builtin' }, 'Built-in (part of the app)'));
       adapter.value = f.adapter || 'package';
+      // an existing provider's adapter type is never switched silently: a compatible provider stays compatible; Built-in / Package providers cannot become compatible
+      if (existing && CL.isCompat(existing)) adapter.disabled = true;
+      if (existing && !CL.isCompat(existing)) adapter.querySelector('option[value="openai_compat"]').disabled = true;
       const sort = inp('aip-sort', f.sort_order), fail = inp('aip-fail', f.failover_order);
       const err = h('p', { class: 'hint', id: 'aip-err', style: 'color:#e5686b' });
+
+      // ---- OpenAI-compatible section
+      const c = CL.configToForm(existing && existing.compat);
+      const base = inp('aip-base', c.base_url, 'https://api.example.com/v1');
+      const authScheme = sel('aip-auth', [['bearer', 'Bearer token (Authorization header) — most providers'], ['header', 'Custom header (for example x-api-key)']], c.auth_scheme);
+      const authHeader = inp('aip-authheader', c.auth_header, 'x-api-key'), authPrefix = inp('aip-authprefix', c.auth_prefix, 'optional text before the key');
+      const chatPath = inp('aip-chat', c.chat_path), modelsPath = inp('aip-models', c.models_path, '/models  (empty = the provider has no model list)');
+      const timeout = inp('aip-timeout', c.timeout_seconds), tokField = sel('aip-tokfield', [['max_tokens', 'max_tokens'], ['max_completion_tokens', 'max_completion_tokens']], c.max_tokens_field);
+      const extra = h('textarea', { id: 'aip-extra', class: 'input', rows: '3', placeholder: 'Name: value   (one per line; never put a key or token here)' }); extra.value = CL.headersToText(c.extra_headers);
+      const headerRow = h('div', { class: 'field', id: 'aip-header-row' }, h('label', {}, 'API key header name and optional prefix'), h('div', { class: 'row' }, authHeader, authPrefix));
+      const testKey = h('input', { class: 'input', id: 'aip-testkey', type: 'password', autocomplete: 'new-password', spellcheck: 'false', placeholder: 'API key for these checks (not saved)', 'aria-label': 'API key for the checks' });
+      const testModel = h('input', { class: 'input', id: 'aip-testmodel', placeholder: 'Model ID to test', list: 'aip-model-list' });
+      const modelList = h('datalist', { id: 'aip-model-list' }, ((existing && existing.models) || []).map((m) => h('option', { value: m.id })));
+      const withImage = h('input', { type: 'checkbox', id: 'aip-testimage' });
+      const out = h('div', { id: 'aip-check-out', 'aria-live': 'polite' });
+      const panel = bridgePanel();
+      const formValues = () => { const hd = CL.parseHeaderLines(extra.value); return { v: { base_url: base.value, chat_path: chatPath.value, models_path: modelsPath.value, auth_scheme: authScheme.value, auth_header: authHeader.value,
+        auth_prefix: authPrefix.value, extra_headers: hd.headers, timeout_seconds: timeout.value, max_tokens_field: tokField.value }, headerErrors: hd.errors }; };
+      const checkBtns = [];
+      const checkBtn = (id, label, fn) => { const b = h('button', { class: 'btn small', type: 'button', id, onclick: () => runIt(b, label, fn) }, label); checkBtns.push(b); return b; };
+      async function runIt(btn, label, fn) {
+        const { v, headerErrors } = formValues();
+        const problems = CL.missingFields(v).concat(headerErrors);
+        if (problems.length) { out.replaceChildren(...problems.map((x) => h('div', { class: 'hint', style: 'color:#e5686b' }, '✗ ' + x))); return; }
+        const old = btn.textContent; checkBtns.forEach((b) => { b.disabled = true; }); btn.textContent = 'Checking…'; out.replaceChildren(h('p', { class: 'hint' }, 'Working…'));
+        try { panel.ensure(); const r = await fn(CL.buildConfig(v), testKey.value.trim()); out.replaceChildren(resultNode(label.replace(/^(Test|Validate|Fetch|Run) /, ''), r)); }
+        finally { checkBtns.forEach((b) => { b.disabled = false; }); btn.textContent = old; }
+      }
+      const needKey = (k) => (k ? null : { ok: false, stage: 'request', classification: 'INVALID_API_KEY', error: 'Enter the API key for these checks first. It is used once and not saved.' });
+      const needModel = () => testModel.value.trim();
+      const checks = h('div', { class: 'card compat-checks', id: 'aip-checks', style: 'margin-top:10px' }, h('h3', {}, 'Check this provider'),
+        h('p', { class: 'hint' }, 'Nothing is saved by these buttons. “Validate” and “Test Connection” need no key.'), panel.el,
+        h('div', { class: 'field' }, h('label', {}, 'API key (only for this check; never stored or sent to the database)'), testKey),
+        h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' },
+          checkBtn('aip-b-validate', 'Validate Configuration', (cfg) => bridge.run('validate', cfg)),
+          checkBtn('aip-b-connect', 'Test Connection', (cfg) => bridge.run('connect', cfg)),
+          checkBtn('aip-b-auth', 'Test Authentication', async (cfg, k) => needKey(k) || bridge.run('auth', cfg, k)),
+          checkBtn('aip-b-models', 'Fetch Models', async (cfg, k) => {
+            const r = needKey(k) || await bridge.run('models', cfg, k);
+            if (r.ok && Array.isArray(r.models)) { modelList.replaceChildren(...r.models.slice(0, 500).map((m) => h('option', { value: m.id }))); r.detail = 'Use “Import models” on the provider row to add them to the catalogue.'; }
+            return r;
+          })),
+        h('div', { class: 'field' }, h('label', {}, 'Test one model'), h('div', { class: 'row' }, testModel, h('label', { class: 'hint', style: 'white-space:nowrap' }, withImage, ' also send an image')), modelList),
+        h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' },
+          checkBtn('aip-b-test', 'Test Selected Model', async (cfg, k) => needKey(k) || (needModel() ? bridge.run('test', cfg, k, { model: needModel(), with_image: withImage.checked }) : { ok: false, stage: 'request', error: 'Enter the model ID to test.' })),
+          checkBtn('aip-b-all', 'Run All Checks', async (cfg, k) => bridge.run('all', cfg, k || undefined, { model: needModel() || undefined, with_image: withImage.checked }))), out);
+      const compatSection = h('div', { id: 'aip-compat' },
+        h('div', { class: 'field' }, h('label', {}, 'Base URL (the provider’s API address, https)'), base),
+        h('div', { class: 'field' }, h('label', {}, 'Authentication'), authScheme), headerRow,
+        h('details', { class: 'compat-advanced' }, h('summary', {}, 'Advanced settings (the defaults suit most providers)'),
+          h('div', { class: 'field' }, h('label', {}, 'Chat completions path'), chatPath),
+          h('div', { class: 'field' }, h('label', {}, 'Models listing path (empty = the provider cannot list its models)'), modelsPath),
+          h('div', { class: 'field' }, h('label', {}, 'Request timeout in seconds (5–120)'), timeout),
+          h('div', { class: 'field' }, h('label', {}, 'Token-limit field name'), tokField),
+          h('div', { class: 'field' }, h('label', {}, 'Custom headers (non-secret only; this catalogue is readable by every signed-in user)'), extra)),
+        checks);
+      const keyCheckRow = h('div', { class: 'field', id: 'aip-val-row' }, h('label', {}, 'Key check type (built-in providers only)'), val);
+      const syncKind = () => {
+        const comp = adapter.value === 'openai_compat';
+        compatSection.style.display = comp ? '' : 'none'; keyCheckRow.style.display = comp ? 'none' : '';
+        headerRow.style.display = authScheme.value === 'header' ? '' : 'none';
+      };
+      adapter.addEventListener('change', syncKind); authScheme.addEventListener('change', syncKind); syncKind();
+
+      const save = async (close) => {
+        const comp = adapter.value === 'openai_compat';
+        if (!PL.validKey(key.value)) { err.textContent = 'The key must start with a letter and use only letters, digits, . _ - (max 40).'; return true; }
+        if (!title.value.trim()) { err.textContent = 'Enter a display title.'; return true; }
+        const k = key.value.trim(), clash = !existing && providerExists(k);
+        if (clash) { err.textContent = `A provider with the key “${k}” already exists (${CL.adapterLabel(clash.adapter)}). It is not changed or converted: use a new provider key.`; return true; }
+        if (!existing && PL.isRemovedProviderKey(removed, k)) { err.textContent = `${k} was removed earlier. Restore it from Removed Providers & Models instead of adding it again; nothing was changed.`; return true; }
+        const base_ = { p_key: k, p_title: title.value.trim(), p_hidden: hidden.checked, p_vision: vision.checked, p_key_url: url.value.trim(), p_key_hint: hint.value.trim(), p_sort: parseInt(sort.value, 10) || 100, p_failover: parseInt(fail.value, 10) || 100 };
+        if (!comp) {
+          try { await reload(() => rpc('admin_upsert_ai_provider', Object.assign(base_, { p_enabled: enabled.checked, p_validate_kind: val.value.trim(), p_adapter: adapter.value })), 'Provider saved'); close(); } catch (e) { err.textContent = CL.friendlyDbError(e.message); return true; }
+          return;
+        }
+        const { v, headerErrors } = formValues(); const problems = CL.missingFields(v).concat(headerErrors);
+        if (problems.length) { err.textContent = problems.join(' '); return true; }
+        const cfg = CL.buildConfig(v);
+        err.textContent = '';
+        confirmSave(k, cfg, base_, enabled.checked, !!existing, close);
+        return true;                                                         // the provider dialog stays open until the confirmation is accepted
+      };
       modal(existing ? `Edit ${f.provider}` : 'Add provider', h('div', {},
+        h('div', { class: 'field' }, h('label', {}, 'Adapter type'), adapter),
         h('div', { class: 'field' }, h('label', {}, 'Provider key (no spaces; cannot change later)'), key),
-        h('div', { class: 'field' }, h('label', {}, 'Display title'), title),
+        h('div', { class: 'field' }, h('label', {}, 'Display name'), title),
+        compatSection,
         h('div', { class: 'field' }, h('label', {}, 'Where to get a key (link)'), url),
-        h('div', { class: 'field' }, h('label', {}, 'Key hint'), hint),
-        h('div', { class: 'field' }, h('label', {}, 'Key check type (built-in providers only)'), val),
-        h('div', { class: 'field' }, h('label', {}, 'Adapter'), adapter),
-        h('div', { class: 'field' }, h('label', {}, vision, ' Understands images')),
+        h('div', { class: 'field' }, h('label', {}, 'Key hint'), hint), keyCheckRow,
+        h('div', { class: 'field' }, h('label', {}, vision, ' Understands images (a single model can still be marked Text only)')),
+        h('div', { class: 'field' }, h('label', {}, enabled, ' Enabled')),
         h('div', { class: 'field' }, h('label', {}, hidden, ' Hidden (kept in the catalogue, not offered to users)')),
         h('div', { class: 'field' }, h('label', {}, 'Order in Settings / order tried (smaller first)'), h('div', { class: 'row' }, sort, fail)), err), [
-        { label: 'Cancel', run: (c) => c() },
-        { label: 'Save', cls: 'primary', run: async (c) => {
-          if (!PL.validKey(key.value)) { err.textContent = 'The key must start with a letter and use only letters, digits, . _ - (max 40).'; return true; }
-          if (!title.value.trim()) { err.textContent = 'Enter a display title.'; return true; }
-          try {
-            await reload(() => rpc('admin_upsert_ai_provider', { p_key: key.value.trim(), p_title: title.value.trim(), p_enabled: f.enabled !== false, p_hidden: hidden.checked, p_vision: vision.checked,
-              p_key_url: url.value.trim(), p_key_hint: hint.value.trim(), p_validate_kind: val.value.trim(), p_adapter: adapter.value, p_sort: parseInt(sort.value, 10) || 100, p_failover: parseInt(fail.value, 10) || 100 }), 'Provider saved');
-            c();
-          } catch (e) { return true; }
-        } }]);
+        { label: 'Cancel', run: (cl) => cl() },
+        { label: 'Save', cls: 'primary', run: save }]);
+
+      function confirmSave(k, cfg, base_, isEnabled, isEdit, closeOuter) {
+        const lines = [['Provider', `${base_.p_title} (${k})`], ['Base URL', cfg.base_url], ['Authentication', cfg.auth_scheme === 'header' ? `Header ${cfg.auth_header}` : 'Bearer token'],
+          ['Model list', cfg.models_path ? cfg.models_path : 'none'], ['Status', (isEnabled ? 'Enabled' : 'Disabled') + (base_.p_hidden ? ', hidden' : '')]];
+        modal(isEdit ? `Save changes to ${k}?` : `Add ${k}?`, h('div', {},
+          h('table', { class: 'inner-table' }, h('tbody', {}, lines.map(([a, b]) => h('tr', {}, h('th', {}, a), h('td', {}, String(b)))))),
+          h('p', { class: 'hint' }, 'Only these settings are saved to the catalogue. No API key is stored: users keep their own keys on their computers. Saving may change what users see after their next catalogue refresh.'),
+          h('p', { class: 'hint', id: 'aip-confirm-err', style: 'color:#e5686b' })), [
+          { label: 'Back', run: (cl) => cl() },
+          { label: isEdit ? 'Save changes' : 'Add provider', cls: 'primary', run: async (cl) => {
+            const box = document.getElementById('aip-confirm-err');
+            try {
+              const r = await rpc('admin_upsert_ai_openai_provider', Object.assign({}, base_, { p_config: cfg, p_enabled: isEnabled }));
+              applyCatalog(r); toast('Provider saved'); cl(); closeOuter();
+            } catch (e) { if (box) box.textContent = CL.friendlyDbError(e.message); return true; }
+          } }]);
+      }
     }
 
+    // ------------------------------------------------------------------ add / edit one model (a compatible provider also gets the Text only switch)
     function modelModal(prov, existing) {
-      const m = existing || { id: '', label: '', enabled: true, sort_order: ((prov.models || []).length + 1) * 10 };
+      const m = existing || { id: '', label: '', enabled: true, sort_order: ((prov.models || []).length + 1) * 10, text_only: true };
+      const comp = CL.isCompat(prov);
       const id = h('input', { id: 'aim-id', class: 'input', value: m.id }), label = h('input', { id: 'aim-label', class: 'input', value: m.label }), sort = h('input', { id: 'aim-sort', class: 'input', value: m.sort_order });
+      const textOnly = h('input', { type: 'checkbox', id: 'aim-textonly' }); textOnly.checked = m.text_only !== false && (comp ? true : false);
+      if (comp && existing) textOnly.checked = !!existing.text_only;
       if (existing) id.disabled = true;
       const err = h('p', { class: 'hint', style: 'color:#e5686b' });
       modal(existing ? `Edit model ${m.id}` : `Add model to ${prov.provider}`, h('div', {},
         h('div', { class: 'field' }, h('label', {}, 'Model ID sent to the provider (cannot change later)'), id),
         h('div', { class: 'field' }, h('label', {}, 'Name users see'), label),
-        h('div', { class: 'field' }, h('label', {}, 'Order (smaller first)'), sort), err), [
+        h('div', { class: 'field' }, h('label', {}, 'Order (smaller first)'), sort),
+        comp ? h('div', { class: 'field' }, h('label', {}, textOnly, ' Text only (never sent images). Untick only for a model you know reads images; “Test Selected Model” with an image can confirm it.')) : null, err), [
         { label: 'Cancel', run: (c) => c() },
         { label: 'Save', cls: 'primary', run: async (c) => {
           if (!id.value.trim() || !label.value.trim()) { err.textContent = 'Enter the model ID and the name.'; return true; }
-          try { await reload(() => rpc('admin_upsert_ai_model', { p_provider: prov.provider, p_model: id.value.trim(), p_label: label.value.trim(), p_enabled: m.enabled !== false, p_sort: parseInt(sort.value, 10) || 100 }), 'Model saved'); c(); } catch (e) { return true; }
+          if (!existing && (prov.models || []).some((x) => x.id === id.value.trim())) { err.textContent = `${id.value.trim()} already exists in ${prov.provider}. Use Edit on that model; nothing was changed.`; return true; }
+          if (!existing && PL.isRemovedModelId(removed, prov.provider, id.value)) { err.textContent = `${id.value.trim()} was removed earlier. Restore it from Removed Providers & Models instead of adding it again; nothing was changed.`; return true; }
+          try {
+            let r = await rpc('admin_upsert_ai_model', { p_provider: prov.provider, p_model: id.value.trim(), p_label: label.value.trim(), p_enabled: m.enabled !== false, p_sort: parseInt(sort.value, 10) || 100 });
+            if (comp && (!existing || !!existing.text_only !== textOnly.checked)) r = await rpc('admin_set_ai_model_text_only', { p_provider: prov.provider, p_model: id.value.trim(), p_text_only: textOnly.checked });
+            applyCatalog(r); toast('Model saved'); c();
+          } catch (e) { err.textContent = CL.friendlyDbError(e.message); return true; }
+        } }]);
+    }
+
+    // ------------------------------------------------------------------ Model Import: fetch ids from the provider, search, select, add (insert-only)
+    function importModal(start) {
+      const providers = compatProviders();
+      if (!providers.length) { modal('Import models', h('p', {}, 'There is no OpenAI-compatible provider yet. Add one first (Add provider → OpenAI-Compatible), then import its models.'), [{ label: 'Close', run: (c) => c() }]); return; }
+      const pick = sel('imp-provider', providers.map((p) => [p.provider, `${p.title} (${p.provider})`]), (start && providers.some((p) => p.provider === start.provider)) ? start.provider : providers[0].provider);
+      let rows = [], query = '', fetched = false;
+      const prov = () => list.find((p) => p.provider === pick.value);
+      const stateIds = () => ({ ex: ((prov() || {}).models || []).map((m) => m.id), rm: (removed.models || []).filter((m) => m.provider === pick.value).map((m) => m.id) });
+      const replan = () => { const { ex, rm } = stateIds(); rows = rows.map((r) => Object.assign(r, { state: ex.includes(r.id) ? 'exists' : rm.includes(r.id) ? 'removed' : 'new' })); };
+      const panel = bridgePanel();
+      const apiKey = h('input', { class: 'input', id: 'imp-key', type: 'password', autocomplete: 'new-password', spellcheck: 'false', placeholder: 'API key (used once to list models; not saved)', 'aria-label': 'API key' });
+      const status = h('p', { class: 'hint', id: 'imp-status', 'aria-live': 'polite' });
+      const search = h('input', { class: 'input', id: 'imp-search', placeholder: 'Search model IDs…', 'aria-label': 'Search models' });
+      const listBox = h('div', { id: 'imp-list', class: 'compat-model-list', style: 'max-height:300px;overflow:auto;margin:6px 0' });
+      const countEl = h('span', { class: 'hint', id: 'imp-count' });
+      const startOrder = h('input', { class: 'input', id: 'imp-order', style: 'width:90px' });
+      const turnOn = h('input', { type: 'checkbox', id: 'imp-enabled' }); turnOn.checked = true;
+      const bulk = sel('imp-bulk', [['text', 'Text only'], ['vision', 'Can read images']], 'text');
+      const customId = h('input', { class: 'input', id: 'imp-custom-id', placeholder: 'Model ID', 'aria-label': 'Custom model ID' }), customLabel = h('input', { class: 'input', id: 'imp-custom-label', placeholder: 'Name users see (optional)', 'aria-label': 'Custom model name' });
+      const fetchBtn = h('button', { class: 'btn small primary', type: 'button', id: 'imp-fetch' }, 'Fetch Models');
+      const addBtn = h('button', { class: 'btn small', type: 'button', id: 'imp-custom-add' }, 'Add to list');
+      const resetOrder = () => { startOrder.value = String((((prov() || {}).models || []).length + 1) * 10); };
+
+      const shown = () => CL.filterModels(rows, query);
+      const selectedRows = () => rows.filter((r) => r.selected && r.state === 'new');
+      function drawList() {
+        replan();
+        const all = shown(), vis = all.slice(0, 300);
+        countEl.textContent = `${rows.length} listed · ${selectedRows().length} selected` + (all.length > vis.length ? ` · showing the first ${vis.length} of ${all.length} matches` : '');
+        if (!rows.length) { listBox.replaceChildren(h('p', { class: 'hint' }, fetched ? 'The provider returned no models.' : 'Fetch the list, or add a model ID by hand below.')); return; }
+        if (!vis.length) { listBox.replaceChildren(h('p', { class: 'hint' }, 'No model matches the search.')); return; }
+        listBox.replaceChildren(h('table', { class: 'inner-table' }, h('thead', {}, h('tr', {}, ['', 'Model ID', 'Name users see', 'Images', ''].map((x) => h('th', {}, x)))), h('tbody', {}, vis.map((r) => {
+          const isNew = r.state === 'new';
+          const cb = h('input', { type: 'checkbox', 'aria-label': 'Select ' + r.id, disabled: !isNew, onchange: () => { r.selected = cb.checked; countEl.textContent = `${rows.length} listed · ${selectedRows().length} selected`; } }); cb.checked = !!r.selected && isNew;
+          const lab = h('input', { class: 'input', value: r.label, disabled: !isNew, 'aria-label': 'Name for ' + r.id, oninput: (e) => { r.label = e.target.value; } });
+          const vs = sel('', [['text', 'Text only'], ['vision', 'Can read images']], r.text_only ? 'text' : 'vision'); vs.disabled = !isNew; vs.setAttribute('aria-label', 'Image support for ' + r.id); vs.addEventListener('change', () => { r.text_only = vs.value === 'text'; });
+          return h('tr', { 'data-model-id': r.id }, h('td', {}, cb), h('td', {}, h('code', {}, r.id), h('div', { class: 'hint' }, r.custom ? 'Added by hand · not verified' : CL.visionNote(r.hint))), h('td', {}, lab), h('td', {}, vs),
+            h('td', {}, r.state === 'exists' ? h('span', { class: 'badge', title: 'Already in this provider’s catalogue; import leaves it unchanged' }, 'Already added') : r.state === 'removed' ? h('span', { class: 'badge suspended', title: 'Removed earlier: restore it from Removed Providers & Models' }, 'Removed earlier') : null));
+        }))));
+      }
+      search.addEventListener('input', () => { query = search.value; drawList(); });
+      pick.addEventListener('change', () => { rows = []; fetched = false; status.textContent = ''; resetOrder(); syncFetch(); drawList(); });
+      function syncFetch() { const p = prov(); const none = p && p.compat && p.compat.models_path === ''; fetchBtn.disabled = !!none; if (none) status.textContent = 'This provider has no models endpoint configured, so its models cannot be listed. Add model IDs by hand below.'; }
+
+      fetchBtn.addEventListener('click', async () => {
+        const p = prov(); if (!p || !p.compat) { status.style.color = colorOf(false); status.textContent = 'This provider has no saved OpenAI-compatible settings.'; return; }
+        if (!apiKey.value.trim()) { status.style.color = colorOf(false); status.textContent = 'Enter the API key first. It is used once and not saved.'; return; }
+        panel.ensure(); fetchBtn.disabled = true; fetchBtn.textContent = 'Fetching…'; status.style.color = ''; status.textContent = 'Asking the provider for its models…';
+        try {
+          const r = await bridge.run('models', p.compat, apiKey.value.trim());
+          if (!r.ok) { const ex = CL.explainFailure(r); status.style.color = colorOf(false); status.textContent = `✗ ${ex.category}: ${ex.advice}`; return; }
+          const keepCustom = rows.filter((x) => x.custom && !r.models.some((m) => m.id === x.id));
+          const { ex, rm } = stateIds();
+          rows = CL.planImport(r.models, ex, rm).map((x) => Object.assign(x, { selected: false, label: x.id, text_only: CL.defaultTextOnly(x.hint) })).concat(keepCustom);
+          fetched = true; status.style.color = colorOf(true); status.textContent = `✓ ${r.count} model${r.count === 1 ? '' : 's'} returned by the provider.`; drawList();
+        } finally { fetchBtn.textContent = 'Fetch Models'; syncFetch(); fetchBtn.disabled = !!(prov() && prov().compat && prov().compat.models_path === ''); }
+      });
+      addBtn.addEventListener('click', () => {
+        const idv = customId.value.trim();
+        if (!CL.validModelId(idv)) { status.style.color = colorOf(false); status.textContent = 'A model ID has 1–120 characters and no spaces.'; return; }
+        const { ex, rm } = stateIds();
+        if (ex.includes(idv)) { status.style.color = '#e5a24c'; status.textContent = `${idv} already exists in ${pick.value}; it is left unchanged.`; return; }
+        if (rm.includes(idv)) { status.style.color = '#e5a24c'; status.textContent = `${idv} was removed earlier: restore it from Removed Providers & Models instead.`; return; }
+        if (rows.some((r) => r.id === idv)) { status.style.color = '#e5a24c'; status.textContent = `${idv} is already in the list below.`; return; }
+        rows.unshift({ id: idv, owned_by: '', hint: null, state: 'new', custom: true, selected: true, label: (customLabel.value.trim() || idv).slice(0, 80), text_only: true });
+        customId.value = ''; customLabel.value = ''; status.style.color = ''; status.textContent = `${idv} added to the list (selected).`; drawList();
+      });
+      const setSel = (fn) => { for (const r of shown()) if (r.state === 'new') fn(r); drawList(); };
+      resetOrder(); syncFetch(); drawList();
+
+      modal('Import models', h('div', { id: 'imp-body' },
+        h('p', { class: 'hint' }, 'Fetch the model IDs a provider offers, tick the ones to add and press “Add selected models”. Models that already exist are never overwritten. Image support is never guessed from a model’s name: unless the provider itself reports it, a model is added as Text only; change it per model if you know better.'),
+        h('div', { class: 'field' }, h('label', {}, 'Provider'), pick), panel.el,
+        h('div', { class: 'field' }, h('label', {}, 'API key (not saved)'), h('div', { class: 'row' }, apiKey, fetchBtn)), status,
+        h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;align-items:center' }, search, countEl),
+        h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;align-items:center' },
+          h('button', { class: 'btn small', type: 'button', id: 'imp-sel-all', onclick: () => setSel((r) => { r.selected = true; }) }, 'Select all shown'),
+          h('button', { class: 'btn small', type: 'button', id: 'imp-sel-none', onclick: () => setSel((r) => { r.selected = false; }) }, 'Clear selection'),
+          h('span', { class: 'hint' }, 'Set selected to'), bulk, h('button', { class: 'btn small', type: 'button', id: 'imp-bulk-apply', onclick: () => { selectedRows().forEach((r) => { r.text_only = bulk.value === 'text'; }); drawList(); } }, 'Apply')),
+        listBox,
+        h('div', { class: 'field' }, h('label', {}, 'Add a model ID by hand'), h('div', { class: 'row' }, customId, customLabel, addBtn)),
+        h('div', { class: 'row', style: 'flex-wrap:wrap;gap:12px;align-items:center' }, h('label', { class: 'hint' }, 'First order number ', startOrder), h('label', { class: 'hint' }, turnOn, ' Turn imported models on'))), [
+        { label: 'Close', run: (c) => c() },
+        { label: 'Add selected models', cls: 'primary', run: async () => {
+          const chosen = selectedRows();
+          if (!chosen.length) { status.style.color = colorOf(false); status.textContent = 'Tick at least one new model first.'; return true; }
+          const payload = CL.buildImportPayload(chosen.map((r) => Object.assign({}, r, { enabled: turnOn.checked })), startOrder.value);
+          modal(`Add ${payload.length} model${payload.length === 1 ? '' : 's'} to ${pick.value}?`, h('div', {},
+            h('p', {}, `${payload.length} new model${payload.length === 1 ? '' : 's'} will be added (${turnOn.checked ? 'turned on' : 'turned off'}; ${payload.filter((x) => x.text_only).length} as Text only). Existing models and their settings are not touched.`),
+            h('p', { class: 'hint', id: 'imp-confirm-err', style: 'color:#e5686b' })), [
+            { label: 'Back', run: (c) => c() },
+            { label: 'Add models', cls: 'primary', run: async (c) => {
+              try {
+                const r = await rpc('admin_import_ai_models', { p_provider: pick.value, p_models: payload });
+                applyCatalog(r); replan(); rows.forEach((x) => { if (x.state !== 'new') x.selected = false; });
+                status.style.color = colorOf(true); status.textContent = '✓ ' + CL.importSummary(r); toast(CL.importSummary(r)); drawList(); c();
+              } catch (e) { const b = document.getElementById('imp-confirm-err'); if (b) b.textContent = CL.friendlyDbError(e.message); return true; }
+            } }]);
+          return true;
         } }]);
     }
 
@@ -1544,39 +1927,195 @@
             const r = await act(() => rpc('admin_delete_ai_package', { p_id: k.id }), 'Deleted'); if (r && r.storage_path) { try { await bucket().remove([r.storage_path]); } catch (e) { /* the row is gone; an orphaned file is harmless */ } } list = r.catalog || list; draw(); }) }, 'Delete') : null)));
     }
 
+    // ---- Removed Providers & Models: two views (providers / models), search, and Restore behind a confirmation. Restoring changes no setting: the row is
+    // un-archived in place (same key, same On/Off, same order, same packages) and an existing active item is never overwritten.
+    function restoreProviderDialog(p) {
+      const plan = PL.restoreProviderPlan(p);
+      modal(`Restore ${p.provider}?`, h('div', { id: 'ai-restore-confirm' },
+        h('p', {}, `${p.title} (${p.provider}) returns to the provider list with its previous settings (${PL.originalStatus(p)}), order and packages.`),
+        h('p', {}, plan.back.length ? `${plan.back.length} model(s) removed together with it come back: ${plan.back.join(', ')}.` : 'It has no models that were removed together with it.'),
+        plan.stay.length ? h('p', { class: 'hint' }, `${plan.stay.length} model(s) that were removed on their own stay in Removed Models: ${plan.stay.join(', ')}.`) : null,
+        h('p', { class: 'hint' }, 'Nothing active is overwritten. Safe to repeat.')), [
+        { label: 'Cancel', run: (c) => c() },
+        { label: 'Restore', cls: 'primary', run: async (c) => {
+          try { const r = await act(() => rpc('admin_restore_ai_provider', { p_key: p.provider }), null); list = r.catalog || list; if (r.removed) removed = r.removed; toast(r.already_active ? `${p.provider} was already active - nothing changed` : `${p.provider} restored`); c(); draw(); } catch (e) { return true; }
+        } }]);
+    }
+    function restoreModelDialog(m) {
+      modal(`Restore model ${m.id}?`, h('div', { id: 'ai-restore-confirm' },
+        h('p', {}, `${m.label} (${m.id}) returns to ${m.provider_title} with its previous settings (${PL.originalStatus(m)}).`),
+        h('p', {}, `The provider ${m.provider} is not changed.`), h('p', { class: 'hint' }, 'Nothing active is overwritten. Safe to repeat.')), [
+        { label: 'Cancel', run: (c) => c() },
+        { label: 'Restore', cls: 'primary', run: async (c) => {
+          try { const r = await act(() => rpc('admin_restore_ai_model', { p_provider: m.provider, p_model: m.id }), null); list = r.catalog || list; if (r.removed) removed = r.removed; toast(r.already_active ? `${m.id} was already active - nothing changed` : `${m.id} restored`); c(); draw(); } catch (e) { return true; }
+        } }]);
+    }
+    function removedPanel() {
+      const body = h('div', { id: 'ai-removed-body' });
+      const tabBtn = (key, label, n) => h('button', { class: 'btn small' + (rmTab === key ? ' primary' : ''), id: 'ai-rm-tab-' + key, 'data-rm-tab': key, onclick: () => { rmTab = key; drawBody(); syncTabs(); } }, `${label} (${n})`);
+      const tabs = h('div', { class: 'row', style: 'gap:6px' });
+      const syncTabs = () => tabs.replaceChildren(tabBtn('providers', 'Removed Providers', (removed.providers || []).length), tabBtn('models', 'Removed Models', (removed.models || []).length));
+      const search = h('input', { id: 'ai-rm-search', class: 'input', placeholder: 'Search name, key or model ID', value: rmQuery, style: 'max-width:260px', oninput: (e) => { rmQuery = e.target.value; drawBody(); } });
+      const empty = (t) => h('p', { class: 'hint', id: 'ai-rm-empty' }, t);
+      function drawBody() {
+        if (!archiveReady) return body.replaceChildren(h('p', { class: 'warn', id: 'ai-rm-needs-0026' }, 'The server does not have migration 0026 yet, so removed items cannot be listed. Remove buttons are switched off until it is applied.'));
+        if (rmTab === 'providers') {
+          const rows = PL.filterRemoved(removed.providers, rmQuery);
+          body.replaceChildren(rows.length ? h('div', { class: 'tablewrap' }, h('table', { id: 'ai-removed-providers' }, h('thead', {}, h('tr', {}, ['Provider', 'Key', 'Models kept', 'Original status', 'Removed', ''].map((x) => h('th', {}, x)))),
+            h('tbody', {}, rows.map((p) => h('tr', { 'data-removed-provider': p.provider },
+              h('td', {}, h('b', {}, p.title), p.hidden ? h('span', { class: 'badge', style: 'margin-left:6px' }, 'Hidden') : null), h('td', {}, h('code', {}, p.provider)),
+              h('td', { title: (p.models || []).map((m) => m.id).join(', ') }, String((p.models || []).length)),
+              h('td', {}, h('span', { class: 'badge' + (p.enabled ? ' ok' : '') }, PL.originalStatus(p))), h('td', {}, fmtShort(p.archived_at)),
+              h('td', { class: 'actions' }, h('button', { class: 'btn small primary', 'data-act': 'restore-provider', onclick: () => restoreProviderDialog(p) }, 'Restore'))))))) : empty((removed.providers || []).length ? 'No removed provider matches the search.' : 'No removed providers.'));
+        } else {
+          const rows = PL.filterRemoved(removed.models, rmQuery);
+          body.replaceChildren(rows.length ? h('div', { class: 'tablewrap' }, h('table', { id: 'ai-removed-models' }, h('thead', {}, h('tr', {}, ['Model', 'Model ID', 'Provider', 'Original status', 'Removed', ''].map((x) => h('th', {}, x)))),
+            h('tbody', {}, rows.map((m) => { const why = PL.restoreModelBlocked(m); return h('tr', { 'data-removed-model': m.id, 'data-provider': m.provider },
+              h('td', {}, h('b', {}, m.label)), h('td', {}, h('code', {}, m.id)),
+              h('td', {}, m.provider_title, ' ', h('code', {}, m.provider), m.provider_archived ? h('span', { class: 'badge suspended', style: 'margin-left:6px' }, 'Provider removed') : null),
+              h('td', {}, h('span', { class: 'badge' + (m.enabled ? ' ok' : '') }, PL.originalStatus(m))), h('td', {}, fmtShort(m.archived_at)),
+              h('td', { class: 'actions' }, h('button', { class: 'btn small primary', 'data-act': 'restore-model', disabled: !!why, title: why || 'Restore only this model', onclick: () => restoreModelDialog(m) }, 'Restore'))); })))) : empty((removed.models || []).length ? 'No removed model matches the search.' : 'No removed models.'));
+        }
+      }
+      syncTabs(); drawBody();
+      return h('div', { id: 'ai-removed' }, h('div', { class: 'toolbar' }, h('h3', {}, 'Removed Providers & Models'), search),
+        h('p', { class: 'hint' }, 'Removing a provider or model never deletes it: it is kept here with its settings, models and packages, and can be restored at any time. Models that were removed together with a provider come back with it; models removed on their own are restored one by one.'),
+        tabs, body);
+    }
+
     function draw() {
       const trs = [];
       for (const p of list) {
         const sw = (on, fn, label) => h('button', { class: 'btn small' + (on ? '' : ' danger'), onclick: fn }, on ? 'On' : 'Off');
         trs.push(h('tr', { class: 'prov', 'data-provider': p.provider },
-          h('td', {}, h('b', {}, p.title), ' ', h('code', {}, p.provider), p.hidden ? h('span', { class: 'badge', style: 'margin-left:6px' }, 'Hidden') : null, ' ', h('span', { class: 'hint' }, p.adapter === 'package' ? 'package' : 'built in')),
+          h('td', {}, h('b', {}, p.title), ' ', h('code', {}, p.provider), p.hidden ? h('span', { class: 'badge', style: 'margin-left:6px' }, 'Hidden') : null, ' ', h('span', { class: 'badge' + (CL.isCompat(p) ? ' ok' : ''), 'data-adapter': p.adapter, style: 'margin-left:6px' }, CL.adapterLabel(p.adapter))),
           h('td', {}, 'Provider'),
           h('td', {}, sw(p.enabled, () => {
             const go = () => reload(() => rpc('admin_set_ai_provider_enabled', { p_key: p.provider, p_enabled: !p.enabled }), `${p.provider} turned ${p.enabled ? 'off' : 'on'}`);
             if (p.enabled) confirmBox(`Turn off ${p.provider}?`, 'It disappears from Meta Generator for every user and is skipped during generation. Their keys and installed packages are not touched.', 'Turn off', go); else go();
           })),
           h('td', { class: 'actions' }, h('button', { class: 'btn small', 'data-act': 'edit', onclick: () => providerModal(p) }, 'Edit'), h('button', { class: 'btn small', 'data-act': 'addmodel', onclick: () => modelModal(p) }, '+ Model'),
-            h('button', { class: 'btn small', 'data-act': 'upload', onclick: () => uploadModal(p) }, 'Upload package'),
+            CL.isCompat(p) ? h('button', { class: 'btn small primary', 'data-act': 'import-models', title: 'Fetch this provider’s model list and add models to the catalogue', onclick: () => importModal(p) }, 'Import models')
+              : p.adapter === 'package' ? h('button', { class: 'btn small', 'data-act': 'upload', onclick: () => uploadModal(p) }, 'Upload package') : null,
             (() => { const why = PL.forceProviderBlocked(p); return h('button', { class: 'btn small danger', 'data-act': 'force-provider', disabled: !!why, title: why || 'Push the published package to every device now', onclick: () => forceModal('provider', p) }, 'Force Update'); })(),
-            PL.canDeleteProvider(p) ? h('button', { class: 'btn small danger', 'data-act': 'delete', onclick: () => confirmBox(`Remove ${p.provider}?`, 'It is removed from the catalogue and from every user’s provider list. Saved keys stay on users’ computers and come back if you add it again.', 'Remove', async () => {
-              const r = await act(() => rpc('admin_delete_ai_provider', { p_key: p.provider }), 'Provider removed'); try { if (r.storage_paths && r.storage_paths.length) await bucket().remove(r.storage_paths); } catch (e) { /* harmless */ } list = r.catalog || list; draw(); }) }, 'Remove') : h('span', { class: 'hint', title: 'Retire its published package first' }, 'has a published package'))));
+            h('button', { class: 'btn small danger', 'data-act': 'delete', disabled: !archiveReady, title: archiveReady ? 'Move to Removed Providers & Models (restorable at any time)' : 'Needs migration 0026 (Removed Providers & Models)',
+              onclick: () => confirmBox(`Remove ${p.provider}?`, 'It is moved to Removed Providers & Models, with all its models, settings and packages kept. Users no longer see it. Nothing is deleted: you can restore it at any time. Saved keys stay on users’ computers.', 'Remove', async () => {
+                const r = await act(() => rpc('admin_archive_ai_provider', { p_key: p.provider }), 'Provider moved to Removed Providers & Models'); list = r.catalog || list; if (r.removed) removed = r.removed; draw(); }) }, 'Remove'))));
         for (const m of p.models || []) trs.push(h('tr', { 'data-provider': p.provider, 'data-model': m.id },
-          h('td', { style: 'padding-left:28px' }, m.label, ' ', h('code', {}, m.id)), h('td', {}, 'Model'),
+          h('td', { style: 'padding-left:28px' }, m.label, ' ', h('code', {}, m.id), CL.isCompat(p) && m.text_only ? h('span', { class: 'badge', style: 'margin-left:6px', title: 'Never sent images' }, 'Text only') : null), h('td', {}, 'Model'),
           h('td', {}, p.enabled ? h('button', { class: 'btn small' + (m.enabled ? '' : ' danger'), onclick: () => reload(() => rpc('admin_set_ai_model_enabled', { p_provider: p.provider, p_model: m.id, p_enabled: !m.enabled }), `${m.id} turned ${m.enabled ? 'off' : 'on'}`) }, m.enabled ? 'On' : 'Off') : h('span', { class: 'hint' }, 'Provider off')),
           h('td', { class: 'actions' }, h('button', { class: 'btn small', 'data-act': 'editmodel', onclick: () => modelModal(p, m) }, 'Edit'), h('button', { class: 'btn small danger', 'data-act': 'force-model', title: 'Push this model definition to every device now', onclick: () => forceModal('model', p, m) }, 'Force Update'),
-            h('button', { class: 'btn small danger', 'data-act': 'delmodel', onclick: () => confirmBox(`Remove model ${m.id}?`, 'Users can no longer choose it.', 'Remove', () => reload(() => rpc('admin_delete_ai_model', { p_provider: p.provider, p_model: m.id }), 'Model removed')) }, 'Remove'))));
+            h('button', { class: 'btn small danger', 'data-act': 'delmodel', disabled: !archiveReady, title: archiveReady ? 'Move to Removed Providers & Models (restorable at any time)' : 'Needs migration 0026 (Removed Providers & Models)',
+              onclick: () => confirmBox(`Remove model ${m.id}?`, `Users can no longer choose it. It is moved to Removed Providers & Models, with its settings kept, and ${p.provider} stays as it is. You can restore it at any time.`, 'Remove', () => reload(() => rpc('admin_archive_ai_model', { p_provider: p.provider, p_model: m.id }), 'Model moved to Removed Providers & Models')) }, 'Remove'))));
         if ((p.packages || []).length) trs.push(h('tr', { 'data-provider': p.provider, class: 'pkgs' }, h('td', { colspan: 4, style: 'padding-left:28px' },
           h('table', { class: 'inner-table' }, h('thead', {}, h('tr', {}, ['Package', 'State', 'Added', ''].map((x) => h('th', {}, x)))), h('tbody', {}, packageRows(p))))));
       }
-      main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'API Configuration — Meta Generator'), h('button', { class: 'btn primary', id: 'ai-add-provider', onclick: () => providerModal(null) }, '+ Add provider')),
-        h('p', { class: 'hint' }, 'This is the catalogue the app uses: the providers, their models, and which of them are on. The app reads it when it starts and on every heartbeat; a switched-off provider or model is hidden and skipped during generation. Providers that need an adapter package are downloaded by users from Settings → API Manager → Providers. Adobe Tracker’s Apify keys are not part of this page.'),
+      main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'API Configuration — Meta Generator'), h('button', { class: 'btn', id: 'ai-restore-defaults', onclick: restoreDefaults, title: 'Add back missing original default providers and models; existing ones are not changed' }, 'Restore Default Providers'), h('button', { class: 'btn', id: 'ai-import-models', onclick: () => importModal(null), title: 'Fetch model IDs from an OpenAI-compatible provider and add them' }, 'Import models'), h('button', { class: 'btn primary', id: 'ai-add-provider', onclick: () => providerModal(null) }, '+ Add provider')),
+        h('p', { class: 'hint' }, 'This is the catalogue the app uses: the providers, their models, and which of them are on. The app reads it when it starts and on every heartbeat; a switched-off provider or model is hidden and skipped during generation. Each provider is Built-in (part of the app), OpenAI-Compatible (the app’s generic runtime; no package, only settings stored here) or a Downloaded Package (users download it from Settings → API Manager → Providers). Adobe Tracker’s Apify keys are not part of this page.'),
         h('div', { class: 'tablewrap' }, h('table', { id: 'ai-rows' }, h('thead', {}, h('tr', {}, ['Provider / model', 'Level', 'Available', ''].map((x) => h('th', {}, x)))), h('tbody', {}, trs))),
-        jobsPanel());
+        removedPanel(), jobsPanel());
     }
     draw();
   }
 
   // ------------------------------------------------------------ app version
+  // ---------------------------------------------------------------- API Provider Announcements (v1.0.0 Part 8A, migration 0029)
+  // Admin-managed notices about an AI API provider, shown to users in Settings -> API -> Options -> Provider. Linked to the provider's STABLE key
+  // (never its display name). Created as a draft; only the Publish button makes it visible. Every action is a database function that checks the
+  // admin list itself. All text is rendered with textContent; the optional thumbnail is re-encoded here to a small data: image (no remote URL).
+  const ANN_IMG_RE = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+  function annThumb(file) {
+    return new Promise((resolve, reject) => {
+      if (!file || !/^image\/(png|jpeg|webp)$/.test(file.type)) return reject(new Error('Choose a PNG, JPEG or WebP image.'));
+      if (file.size > 5 * 1024 * 1024) return reject(new Error('That image file is too large (max 5 MB).'));
+      const fr = new FileReader();
+      fr.onerror = () => reject(new Error('Could not read the image.'));
+      fr.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('That file is not a readable image.'));
+        img.onload = () => {
+          const k = Math.min(1, 128 / Math.max(img.width, img.height, 1));
+          const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(img.width * k)); c.height = Math.max(1, Math.round(img.height * k));
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          let out = c.toDataURL('image/webp', 0.82);
+          if (!/^data:image\/webp/.test(out)) out = c.toDataURL('image/jpeg', 0.82);
+          if (!ANN_IMG_RE.test(out) || out.length > 60000) return reject(new Error('The thumbnail is still too big after shrinking. Try a simpler image.'));
+          resolve(out);
+        };
+        img.src = String(fr.result);
+      };
+      fr.readAsDataURL(file);
+    });
+  }
+  async function pageApiAnn(main) {
+    let data;
+    try { data = await rpc('admin_list_api_provider_announcements'); }
+    catch (e) { main.replaceChildren(h('div', { class: 'toolbar' }, h('h2', {}, 'API Provider Announcements')), h('p', { class: 'warn', id: 'apiann-needs-0029' }, 'Not available on this server yet (apply migration 0029_api_provider_announcements.sql). ' + e.message)); return; }
+    let query = '', filter = 'all';
+    const providers = data.providers || [];
+    function modalFor(u) {
+      let image = u && u.image_data && ANN_IMG_RE.test(u.image_data) ? u.image_data : null;
+      const sel = h('select', { id: 'apiann-provider' });
+      const opts = providers.slice();
+      if (u && !opts.some((p) => p.provider === u.provider_key)) opts.unshift({ provider: u.provider_key, title: u.provider_title + ' (removed)' });
+      for (const p of opts) sel.append(h('option', { value: p.provider }, `${p.title} (${p.provider})`));
+      if (u) sel.value = u.provider_key;
+      const title = h('input', { type: 'text', id: 'apiann-title', maxlength: '80', placeholder: 'New model available', value: u ? u.title : '' });
+      const desc = h('textarea', { id: 'apiann-desc', maxlength: '400', placeholder: 'One or two sentences users will read. Plain text only.' }, u ? u.description : '');
+      const preview = h('div', { class: 'ann-preview', id: 'apiann-preview' });
+      const drawPreview = () => preview.replaceChildren(image ? h('img', { class: 'ann-thumb', src: image, alt: '' }) : h('span', { class: 'hint' }, 'No image'));
+      drawPreview();
+      const file = h('input', { type: 'file', id: 'apiann-image', accept: 'image/png,image/jpeg,image/webp' });
+      file.addEventListener('change', async () => {
+        const f = file.files && file.files[0]; if (!f) return;
+        try { image = await annThumb(f); drawPreview(); } catch (e) { toast(e.message, true); file.value = ''; }
+      });
+      modal(u ? 'Edit announcement' : 'New announcement', h('div', {},
+        h('div', { class: 'field' }, h('label', {}, 'Provider'), sel),
+        h('div', { class: 'field' }, h('label', {}, 'Title (max 80 characters)'), title),
+        h('div', { class: 'field' }, h('label', {}, 'Short description (max 400 characters)'), desc),
+        h('div', { class: 'field' }, h('label', {}, 'Thumbnail (optional; PNG, JPEG or WebP, shrunk to 128 px and stored inside the announcement)'), file,
+          h('div', { class: 'row', style: 'margin-top:6px' }, preview, h('button', { class: 'btn small', type: 'button', id: 'apiann-image-clear', onclick: () => { image = null; file.value = ''; drawPreview(); } }, 'Remove image'))),
+        h('p', { class: 'hint' }, 'Saving never publishes. A new announcement is a draft until you press Publish.')),
+      [{ label: 'Cancel', run: (c) => c() }, { label: 'Save', cls: 'primary', run: async (c) => {
+        if (!sel.value) { toast('Choose the provider', true); return true; }
+        if (!title.value.trim()) { toast('Write the title first', true); return true; }
+        await act(() => rpc('admin_upsert_api_provider_announcement', { p_id: u ? u.id : null, p_provider_key: sel.value, p_title: title.value.trim(), p_description: desc.value.trim(),
+          p_image_data: image, p_expected_updated_at: u ? u.updated_at : null }), 'Announcement saved');
+        c(); go('apiann'); } }]);
+    }
+    const list = h('div', { id: 'apiann-list' });
+    function draw() {
+      const q = query.trim().toLowerCase();
+      const rows = (data.announcements || []).filter((a) => (filter === 'all' || a.status === (filter === 'published' ? 'published' : 'draft'))
+        && (!q || `${a.title} ${a.description} ${a.provider_key} ${a.provider_title}`.toLowerCase().includes(q)));
+      if (!rows.length) { list.replaceChildren(h('p', { class: 'hint', id: 'apiann-empty' }, (data.announcements || []).length ? 'No announcement matches.' : 'No announcements yet.')); return; }
+      list.replaceChildren(h('div', { class: 'tablewrap' }, h('table', { id: 'apiann-table' }, h('thead', {}, h('tr', {}, ['', 'Announcement', 'Provider', 'State', 'Users read / dismissed', 'Updated', 'Actions'].map((x) => h('th', {}, x)))),
+        h('tbody', {}, rows.map((a) => h('tr', { 'data-apiann': a.id, 'data-status': a.status },
+          h('td', {}, a.image_data && ANN_IMG_RE.test(a.image_data) ? h('img', { class: 'ann-thumb', src: a.image_data, alt: '' }) : null),
+          h('td', {}, h('b', {}, a.title), a.description ? h('div', { class: 'hint', style: 'margin:2px 0 0' }, a.description) : null),
+          h('td', {}, a.provider_title, ' ', h('code', {}, a.provider_key), a.provider_archived ? h('span', { class: 'badge suspended', style: 'margin-left:6px' }, 'Provider removed') : null),
+          h('td', {}, h('span', { class: 'badge' + (a.status === 'published' ? ' ok' : '') }, a.status === 'published' ? 'Published' : 'Unpublished')),
+          h('td', {}, `${num(a.read_count)} / ${num(a.dismissed_count)}`), h('td', {}, fmtShort(a.updated_at)),
+          h('td', { class: 'actions' },
+            h('button', { class: 'btn small', 'data-act': 'edit', type: 'button', onclick: () => modalFor(a) }, 'Edit'),
+            a.status === 'draft' ? h('button', { class: 'btn small primary', 'data-act': 'publish', type: 'button', disabled: a.provider_archived, title: a.provider_archived ? 'Restore the provider first' : 'Users will see it', onclick: async () => { await act(() => rpc('admin_set_api_provider_announcement_status', { p_id: a.id, p_status: 'published', p_expected_updated_at: a.updated_at }), 'Published: users can now see it'); go('apiann'); } }, 'Publish') : null,
+            a.status === 'published' ? h('button', { class: 'btn small', 'data-act': 'unpublish', type: 'button', onclick: async () => { await act(() => rpc('admin_set_api_provider_announcement_status', { p_id: a.id, p_status: 'draft', p_expected_updated_at: a.updated_at }), 'Hidden from users'); go('apiann'); } }, 'Unpublish') : null,
+            h('button', { class: 'btn small danger', 'data-act': 'delete', type: 'button', onclick: () => confirmBox('Delete announcement', 'Only this announcement (and users’ read marks for it) is deleted. Providers, models and keys are not touched.', 'Delete',
+              async () => { await act(() => rpc('admin_delete_api_provider_announcement', { p_id: a.id }), 'Announcement deleted'); go('apiann'); }) }, 'Delete'))))))));
+    }
+    const search = h('input', { id: 'apiann-search', class: 'input', placeholder: 'Search title, text or provider', style: 'max-width:260px', oninput: (e) => { query = e.target.value; draw(); } });
+    const chips = h('div', { class: 'row', style: 'gap:6px' });
+    const drawChips = () => chips.replaceChildren(...[['all', 'All'], ['published', 'Published'], ['draft', 'Unpublished']].map(([k, l]) =>
+      h('button', { class: 'chip' + (filter === k ? ' on' : ''), type: 'button', 'data-filter': k, onclick: () => { filter = k; drawChips(); draw(); } }, l)));
+    drawChips(); draw();
+    main.replaceChildren(
+      h('div', { class: 'toolbar' }, h('h2', {}, 'API Provider Announcements'), search, h('button', { class: 'btn small', id: 'btn-apiann-refresh', onclick: () => go('apiann') }, 'Refresh'),
+        h('button', { class: 'btn primary small', id: 'btn-apiann-new', type: 'button', onclick: () => modalFor(null) }, 'New announcement')),
+      h('p', { class: 'hint' }, 'Notices about an AI API provider. Users see published ones on that provider’s card in Settings → API → Options → Provider, with a NEW marker until they read or dismiss it. A provider that is removed in API Configuration hides its announcements automatically.'),
+      chips, list);
+  }
+
   async function pageVersion(main) {
     const list = await rpc('admin_list_versions');
     const rows = h('tbody', { id: 'ver-rows' }, list.map((v) => h('tr', { 'data-version': v.version },
