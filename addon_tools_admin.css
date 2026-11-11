@@ -1,0 +1,27 @@
+/* Addon Tools Manager (Part 5). Uses only the tokens and components of admin.css; adds a few layout helpers, all prefixed .at-. */
+.at-root.at-busy .at-act { opacity:.5; pointer-events:none; }
+.at-stack { display:flex; flex-direction:column; gap:var(--sp-4); }
+.at-note { margin:var(--sp-2) 0 0; font-size:var(--fs-sm); }
+.at-note.warn { color:var(--warning); } .at-note.hint { color:var(--text-faint); }
+.at-kvs { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:var(--sp-3); }
+.at-kv { display:flex; flex-direction:column; min-width:0; } .at-kv span { color:var(--text-faint); font-size:var(--fs-xs); text-transform:uppercase; letter-spacing:.05em; }
+.at-kv b { font-weight:620; overflow-wrap:anywhere; }
+.at-switch { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-4); padding:var(--sp-3) 0; border-bottom:1px solid var(--border-soft); } .at-switch:last-child { border-bottom:0; }
+.at-banner { border-color:rgba(227,174,69,.45); background:var(--warning-soft); }
+.at-current { background:var(--success-soft); }
+.at-clip { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+td.at-wrap { white-space:normal; min-width:190px; } td.at-wrap button { margin-bottom:5px; }
+.at-warnbox { border:1px solid rgba(227,174,69,.4); background:var(--warning-soft); border-radius:var(--radius-md); padding:var(--sp-3); margin:var(--sp-3) 0; font-size:var(--fs-sm); }
+.at-warnbox.err { border-color:rgba(239,106,109,.45); background:var(--error-soft); }
+.at-warnbox ul { margin:6px 0 0; padding-left:18px; } .at-warnbox li { margin:2px 0; overflow-wrap:anywhere; }
+.at-okline { color:var(--success); font-weight:600; }
+.at-results { display:flex; flex-direction:column; gap:var(--sp-2); max-height:320px; overflow:auto; }
+.at-pick { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); border:1px solid var(--border-soft); border-radius:var(--radius-md); padding:var(--sp-2) var(--sp-3); }
+.at-row:hover { cursor:default; }
+.at-tags, .at-plans { display:inline-flex; flex-wrap:wrap; gap:4px; }
+.at-kv .at-tags, .at-kv .at-plans { margin-top:2px; }
+/* Part 13: access requests */
+.at-count { margin-left:6px; padding:0 7px; }
+.at-msg { white-space:pre-wrap; overflow-wrap:anywhere; }
+tr[data-focus="1"] { background:var(--warning-soft); }
+.nav button .nav-badge { margin-left:auto; }

@@ -107,6 +107,7 @@
     notices: 'M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z',
     version: 'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z',
     addons: 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z',
+    addontools: 'M22 9V7h-2V5c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-2h2v-2h-2v-2h2v-2h-2V9h2zm-4 10H4V5h14v14zM6 13h5v4H6zm6-6h4v3h-4zM6 7h5v5H6zm6 4h4v6h-4z',
     apiann: 'M3 11v2h3l5 4V7L6 11H3zm13.5 1c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z',
     menu: 'M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z',
   };
@@ -116,7 +117,7 @@
   }
   const logoImg = (cls, src) => h('img', { class: cls || '', src: src || 'assets/logo/metazone-icon.png', alt: 'MetaZone', width: '64', height: '64' });
   const NAV = [['Dashboard', [['overview', 'Overview'], ['users', 'Users']]],
-               ['Plans & access', [['limits', 'Limits & Offers'], ['pages', 'Pages'], ['addons', 'Add-ons'], ['ai', 'API Configuration']]],
+               ['Plans & access', [['limits', 'Limits & Offers'], ['pages', 'Pages'], ['addons', 'Add-ons'], ['addontools', 'Addon Tools'], ['ai', 'API Configuration']]],
                ['Communication', [['payment', 'Premium payment info'], ['notices', 'Notices'], ['apiann', 'API Provider Announcements'], ['version', 'App version']]]];
   const TABS = NAV.flatMap(([, items]) => items);
   function shell() {
@@ -138,6 +139,16 @@
     app.replaceChildren(shellEl);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
     go(tab);
+    refreshRequestBadge(); setInterval(refreshRequestBadge, 60000);          // V5 Part 13: pending Developer Import requests -> badge on the Addon Tools nav button (read-only call)
+  }
+  function setNavBadge(n) {
+    const b = document.querySelector('.nav button[data-tab="addontools"]'); if (!b) return; let el = b.querySelector('.nav-badge');
+    if (!(n > 0)) { if (el) el.remove(); b.title = 'Addon Tools'; return; }
+    if (!el) { el = h('span', { class: 'badge premium nav-badge' }); b.append(el); }
+    el.textContent = String(n); b.title = 'Addon Tools: ' + n + ' pending Developer Import request' + (n === 1 ? '' : 's');
+  }
+  async function refreshRequestBadge() {
+    try { const s = await rpc('admin_addon_tools_developer_request_summary'); const n = Number(s && s.pending_count); setNavBadge(Number.isInteger(n) && n >= 0 ? n : 0); } catch (e) { /* 0038 not applied or offline: no badge */ }
   }
   function go(id) {
     tab = id; clearInterval(refreshTimer); closeMenu();
@@ -149,8 +160,17 @@
     const old = document.getElementById('main');
     const main = h('div', { class: 'main', id: 'main' }, h('div', { class: 'skel' }, h('span', { class: 'spin' }), 'Loading…'));
     old.replaceWith(main);
-    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, addons: pageAddons, ai: pageAi, payment: pagePayment, notices: pageNotices, apiann: pageApiAnn, version: pageVersion }[id];
+    const page = { overview: pageOverview, users: pageUsers, limits: pageLimits, pages: pagePages, addons: pageAddons, addontools: pageAddonTools, ai: pageAi, payment: pagePayment, notices: pageNotices, apiann: pageApiAnn, version: pageVersion }[id];
     page(main).catch((e) => main.replaceChildren(h('p', { class: 'warn' }, 'Error: ' + e.message)));
+  }
+
+  // ------------------------------------------------------- Addon Tools (Part 5)
+  // The new Addon Tools system (separate from the old Add-ons tab). The screen lives in addon_tools_admin.js / addon_tools_logic.js; this only hands over the
+  // shared helpers so it looks and behaves like the other pages. It uses the admin's own session; the site holds no service key.
+  async function pageAddonTools(main) {
+    const ui = window.MZ_ADDON_TOOLS_UI;
+    if (!ui || !window.MZ_ADDON_TOOLS) { main.replaceChildren(h('p', { class: 'warn' }, 'The Addon Tools screen files did not load (addon_tools_logic.js / addon_tools_admin.js).')); return; }
+    await ui.mount(main, { h, rpc, toast, modal, fmt, fmtShort, sb, cfg, setNavBadge });
   }
 
   // -------------------------------------------------------------- overview

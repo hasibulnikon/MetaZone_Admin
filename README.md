@@ -69,3 +69,17 @@ API Configuration -> Add provider -> *OpenAI-Compatible* needs no adapter packag
 **Import models** use the local bridge, because a browser page cannot run the app's Python runtime: start it with `python3 scripts/provider_bridge.py` in `MetaZone_App/MetaZone_js` (or
 `scripts\run_provider_bridge.bat`), then paste the access code it prints into the "Local bridge" box. Requires migrations 0027 (provider builder) and 0028 (model import) to be applied first.
 Files: `compat_logic.js` (helpers + bridge client), `admin.js` (screens), `database/0027_*.sql`, `database/0028_*.sql`.
+
+## Addon Tools Manager (Part 5, needs migration 0032 + the `addon-tools-publish` Edge Function)
+
+**Plans & access -> Addon Tools** manages the NEW Addon Tools system (ZIP packages, signed releases, own window in the Main App). It is separate from the **Add-ons** tab, which still manages the old `.mzaddon` add-ons and is unchanged.
+* **Tools** - list with status (Live / Unpublished / Disabled / No current release / nobody has access), current version, access. `New tool` creates a hidden tool with no access; `Manage` opens it.
+* **Overview** - edit name / description / author; **Publish / Unpublish** and **Enable / Disable** (confirmation first); **Force update** (minimum installed version + reason, or clear).
+* **Releases** - history (version, sequence, current / previous / replaced-by-rollback / revoked, size, file count, SHA-256, key id, permissions, notes). `Make current` (newer = update), `Roll back to this` (older; reason required), `Revoke` (reason required; the current release cannot be revoked) and `Restore`.
+* **Upload release** - choose the tool, a `.zip` (max 50 MB) and optional notes. The ZIP goes to the existing `addon-tools-publish` function with your own session token; the SERVER validates, hashes, signs, stores and registers it. The screen shows the result: problems (path + message), advisory warnings, signed key id, "stored but not offered yet" with a `Make this release current` shortcut. If a failed upload left a file in Storage that no release uses, `Remove uploaded file` calls the function's `recover_orphan` action. If the answer was lost, the screen says the outcome is uncertain and reloads the release list instead of guessing.
+* **Access** - Free / Premium switches and per-user Allow / Deny overrides (search by email; remove an override to fall back to the plan switch). The master switches (published, enabled, a current release) beat a personal allow.
+* **Audit log** - per tool and for all tools: who, when, what (append-only, from `admin_addon_tools_list_audit`; newest 200, filter box).
+* **Signing key** - shows the public key id / algorithm / fingerprint from the function's `key_info` (public facts only) so you can compare with `addon_tools_rt/keys.py`.
+
+Every change is one of the 0032 admin RPCs and sends the tool's `revision` (`p_expected_revision`), so a stale screen is refused ("someone else changed this tool") and reloaded. The site holds no service key and no signing key; it never reads the Addon Tools tables directly. Files: `addon_tools_logic.js` (pure logic + Edge Function client), `addon_tools_admin.js` (screen), `addon_tools_admin.css`; tests (not run when written): `node --test test/addon_tools_logic.test.js test/addon_tools_contract.test.js`.
+Publishing answers 503 until the three `ADDON_TOOLS_SIGNING_*` secrets are set and the function is deployed (see `docs/ADDON_TOOLS_SIGNING.md`); the rest of the screen works without them.
