@@ -48,10 +48,32 @@
   /** Stored provider row (catalogue `compat`) -> form values. */
   const configToForm = (c) => Object.assign({}, DEFAULTS, c || {});
 
+  /* ---- Part 80: provider presets (settings only: base URL, paths, links; never a key, never a model list baked into the app). Every value stays editable. ----
+     The provider keys are suggestions that do not clash with the built-in Groq / OpenRouter providers; Cloudflare's URL carries a <ACCOUNT_ID> placeholder that must be replaced. */
+  const PRESETS = [
+    { id: 'custom', label: 'Custom (any OpenAI-compatible provider)', fill: null },
+    { id: 'groq', label: 'Groq', fill: { provider: 'groq_compat', title: 'Groq (OpenAI-compatible)', base_url: 'https://api.groq.com/openai/v1', chat_path: '/chat/completions', models_path: '/models', key_url: 'https://console.groq.com/keys', key_hint: 'Starts with gsk_' } },
+    { id: 'openrouter', label: 'OpenRouter', fill: { provider: 'openrouter_compat', title: 'OpenRouter (OpenAI-compatible)', base_url: 'https://openrouter.ai/api/v1', chat_path: '/chat/completions', models_path: '/models', key_url: 'https://openrouter.ai/keys', key_hint: 'Starts with sk-or-' } },
+    { id: 'cloudflare', label: 'Cloudflare Workers AI', fill: { provider: 'cloudflare_workers_ai', title: 'Cloudflare Workers AI', base_url: 'https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1', chat_path: '/chat/completions', models_path: '', key_url: 'https://dash.cloudflare.com/profile/api-tokens', key_hint: 'An API token with Workers AI permission. Replace <ACCOUNT_ID> in the base URL with your Cloudflare account ID. This API has no OpenAI model list: add model IDs by hand.' } },
+    { id: 'nvidia', label: 'NVIDIA NIM', fill: { provider: 'nvidia_nim', title: 'NVIDIA NIM', base_url: 'https://integrate.api.nvidia.com/v1', chat_path: '/chat/completions', models_path: '/models', key_url: 'https://build.nvidia.com/', key_hint: 'Starts with nvapi-' } },
+  ];
+  const presetById = (id) => PRESETS.find((p) => p.id === id) || PRESETS[0];
+  /** True when the base URL still contains an unreplaced <PLACEHOLDER>. */
+  const hasPlaceholder = (url) => /<[A-Za-z_]+>/.test(String(url || ''));
+  /** Stable text for "is this the configuration that passed a check?" (key order independent). */
+  function configSignature(cfg) {
+    const o = cfg || {}; const keys = Object.keys(o).sort(); const out = {};
+    for (const k of keys) out[k] = (o[k] && typeof o[k] === 'object') ? JSON.parse(configSignature(o[k])) : o[k];
+    return JSON.stringify(out);
+  }
+  /** Enabled AND published only when a connection check passed for exactly this configuration, or the admin explicitly accepted publishing without one. */
+  const publishEnabled = (wantEnabled, checkedSig, cfg, acceptUnchecked) => !!wantEnabled && (acceptUnchecked === true || (!!checkedSig && checkedSig === configSignature(cfg)));
+
   /** Required-field check only (the Python validator and the database re-check everything else). */
   function missingFields(v) {
     const p = [];
-    if (!String(v.base_url || '').trim()) p.push('Enter the base URL.');
+    if (hasPlaceholder(v.base_url)) p.push('Replace the <PLACEHOLDER> in the base URL with your real value (Cloudflare: your account ID).');
+    else if (!String(v.base_url || '').trim()) p.push('Enter the base URL.');
     else if (!/^https:\/\//i.test(String(v.base_url).trim())) p.push('The base URL must start with https://');
     if (v.auth_scheme === 'header' && !String(v.auth_header || '').trim()) p.push('Enter the API key header name.');
     return p;
@@ -169,7 +191,7 @@
     return m;
   }
 
-  const api = { ADAPTER_LABEL, adapterLabel, isCompat, DEFAULTS, parseHeaderLines, headersToText, buildConfig, configToForm, missingFields, explainFailure, stageLabel, DEFAULT_BRIDGE_URL, START_HELP,
+  const api = { ADAPTER_LABEL, adapterLabel, isCompat, DEFAULTS, parseHeaderLines, headersToText, buildConfig, configToForm, missingFields, PRESETS, presetById, hasPlaceholder, configSignature, publishEnabled, explainFailure, stageLabel, DEFAULT_BRIDGE_URL, START_HELP,
     bridgeOrigin, makeBridge, validModelId, filterModels, defaultTextOnly, visionNote, planImport, buildImportPayload, importSummary, friendlyDbError };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.CompatLogic = api;

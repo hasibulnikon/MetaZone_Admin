@@ -116,26 +116,42 @@
     const p = document.createElementNS('http://www.w3.org/2000/svg', 'path'); p.setAttribute('d', ICONS[id] || ICONS.overview); s.append(p); return s;
   }
   const logoImg = (cls, src) => h('img', { class: cls || '', src: src || 'assets/logo/metazone-icon.png', alt: 'MetaZone', width: '64', height: '64' });
-  const NAV = [['Dashboard', [['overview', 'Overview'], ['users', 'Users']]],
-               ['Plans & access', [['limits', 'Limits & Offers'], ['pages', 'Pages'], ['addons', 'Add-ons'], ['addontools', 'Addon Tools'], ['ai', 'API Configuration']]],
-               ['Communication', [['payment', 'Premium payment info'], ['notices', 'Notices'], ['apiann', 'API Provider Announcements'], ['version', 'App version']]]];
+  // Part 80: the same tabs (same ids, same screens), grouped by what the admin is doing.
+  const NAV = [['Dashboard', [['overview', 'Overview']]],
+               ['Pages & permissions', [['pages', 'Pages'], ['limits', 'Limits & Offers']]],
+               ['Users & controls', [['users', 'Users']]],
+               ['API Provider Manager', [['ai', 'API Provider Manager'], ['apiann', 'API Provider Announcements']]],
+               ['Licensing', [['payment', 'Payment info']]],
+               ['Publishing', [['version', 'App version'], ['addons', 'Add-ons'], ['addontools', 'Addon Tools']]],
+               ['Other tools', [['notices', 'Notices']]]];
   const TABS = NAV.flatMap(([, items]) => items);
   function shell() {
-    const nav = h('div', { class: 'nav' }, NAV.map(([group, items]) => [h('div', { class: 'nav-group' }, group),
-      items.map(([id, label]) => h('button', { 'data-tab': id, title: label, class: id === tab ? 'on' : '', onclick: () => go(id) }, icon(id), h('span', {}, label)))]));
+    // Groups with more than one screen fold (state remembered per browser); the group holding the open screen is never hidden.
+    const foldKey = 'mz_admin_nav_shut';
+    let shut = []; try { shut = JSON.parse(localStorage.getItem(foldKey) || '[]'); } catch (e) { shut = []; }
+    const nav = h('div', { class: 'nav' }, NAV.map(([group, items]) => {
+      const btns = items.map(([id, label]) => h('button', { 'data-tab': id, title: label, class: id === tab ? 'on' : '', onclick: () => go(id) }, icon(id), h('span', {}, label)));
+      if (items.length < 2) return [h('div', { class: 'nav-group' }, group), btns];
+      const list = h('div', { class: 'nav-items' }, btns), head = h('div', { class: 'nav-group fold', role: 'button', tabindex: '0', 'aria-expanded': 'true' }, group);
+      const apply = (isShut) => { list.classList.toggle('shut', isShut); head.classList.toggle('shut', isShut); head.setAttribute('aria-expanded', String(!isShut)); };
+      const toggle = () => { const now = !list.classList.contains('shut'); apply(now); shut = shut.filter((g) => g !== group).concat(now ? [group] : []); try { localStorage.setItem(foldKey, JSON.stringify(shut)); } catch (e) { /* per-viewer convenience only */ } };
+      head.addEventListener('click', toggle); head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+      apply(shut.includes(group) && !items.some(([id]) => id === tab));
+      return [head, list];
+    }));
     const shellEl = h('div', { class: 'shell' });
     const setMenu = (open) => { shellEl.classList.toggle('menu-open', open); const b = document.getElementById('btn-menu'); if (b) b.setAttribute('aria-expanded', String(open)); };
     closeMenu = () => setMenu(false);
     const topbar = h('div', { class: 'topbar' },
       h('button', { class: 'menu-btn', id: 'btn-menu', type: 'button', 'aria-label': 'Open menu', 'aria-expanded': 'false', onclick: () => setMenu(!shellEl.classList.contains('menu-open')) }, icon('menu')),
-      logoImg('tb-logo'), h('b', { id: 'topbar-title' }, ''));
-    shellEl.append(topbar, h('div', { class: 'scrim', onclick: closeMenu }),
+      logoImg('tb-logo'), h('div', { class: 'crumb', id: 'topbar-title' }), h('span', { class: 'tb-who', title: adminEmail }, adminEmail));
+    shellEl.append(h('div', { class: 'scrim', onclick: closeMenu }),
       h('div', { class: 'side' },
         h('div', { class: 'brand' }, logoImg(), h('div', {}, h('b', {}, 'MetaZone'), h('small', {}, 'Admin'))),
         nav,
         h('div', { class: 'who' }, h('span', { class: 'email' }, adminEmail), h('span', { class: 'ver' }, 'Admin v' + ADMIN_VERSION),
           h('button', { class: 'btn small', id: 'btn-signout', title: 'Sign out', onclick: signOut }, 'Sign out'))),
-      h('div', { class: 'main', id: 'main' }));
+      h('div', { class: 'stage' }, topbar, h('div', { class: 'main', id: 'main' })));
     app.replaceChildren(shellEl);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
     go(tab);
@@ -152,7 +168,11 @@
   }
   function go(id) {
     tab = id; clearInterval(refreshTimer); closeMenu();
-    const tt = document.getElementById('topbar-title'); if (tt) tt.textContent = (TABS.find(([i]) => i === id) || [, ''])[1];
+    const tt = document.getElementById('topbar-title');
+    if (tt) { const g = NAV.find(([, its]) => its.some(([i]) => i === id)) || ['', []]; const lab = (TABS.find(([i]) => i === id) || [, ''])[1];
+      tt.replaceChildren(...(g[0].toLowerCase() === lab.toLowerCase() ? [] : [h('span', { class: 'grp' }, g[0]), h('span', { class: 'sep' }, '›')]), h('b', {}, lab)); }
+    const grpBtn = document.querySelector('.nav button[data-tab="' + id + '"]'); const grpList = grpBtn && grpBtn.parentElement;
+    if (grpList && grpList.classList.contains('nav-items') && grpList.classList.contains('shut')) { grpList.classList.remove('shut'); if (grpList.previousElementSibling) grpList.previousElementSibling.classList.remove('shut'); }
     document.querySelectorAll('.nav button').forEach((b) => b.classList.toggle('on', b.dataset.tab === id));
     // v0.9.9.10 (Task 3 Phase A): every navigation renders into its OWN fresh #main element and swaps it in. A slower, earlier
     // load keeps a reference to its old (now detached) element, so when it finishes it can only write there -- never into the
@@ -1658,6 +1678,7 @@
       if (existing && !CL.isCompat(existing)) adapter.querySelector('option[value="openai_compat"]').disabled = true;
       const sort = inp('aip-sort', f.sort_order), fail = inp('aip-fail', f.failover_order);
       const err = h('p', { class: 'hint', id: 'aip-err', style: 'color:#e5686b' });
+      let checkedSig = '';   // Part 80: signature of the configuration a real connection check passed for in this dialog
 
       // ---- OpenAI-compatible section
       const c = CL.configToForm(existing && existing.compat);
@@ -1677,22 +1698,33 @@
       const formValues = () => { const hd = CL.parseHeaderLines(extra.value); return { v: { base_url: base.value, chat_path: chatPath.value, models_path: modelsPath.value, auth_scheme: authScheme.value, auth_header: authHeader.value,
         auth_prefix: authPrefix.value, extra_headers: hd.headers, timeout_seconds: timeout.value, max_tokens_field: tokField.value }, headerErrors: hd.errors }; };
       const checkBtns = [];
-      const checkBtn = (id, label, fn) => { const b = h('button', { class: 'btn small', type: 'button', id, onclick: () => runIt(b, label, fn) }, label); checkBtns.push(b); return b; };
-      async function runIt(btn, label, fn) {
+      const checkBtn = (id, label, fn, counts) => { const b = h('button', { class: 'btn small', type: 'button', id, onclick: () => runIt(b, label, fn, counts !== false) }, label); checkBtns.push(b); return b; };
+      async function runIt(btn, label, fn, counts) {
         const { v, headerErrors } = formValues();
         const problems = CL.missingFields(v).concat(headerErrors);
         if (problems.length) { out.replaceChildren(...problems.map((x) => h('div', { class: 'hint', style: 'color:#e5686b' }, '✗ ' + x))); return; }
         const old = btn.textContent; checkBtns.forEach((b) => { b.disabled = true; }); btn.textContent = 'Checking…'; out.replaceChildren(h('p', { class: 'hint' }, 'Working…'));
-        try { panel.ensure(); const r = await fn(CL.buildConfig(v), testKey.value.trim()); out.replaceChildren(resultNode(label.replace(/^(Test|Validate|Fetch|Run) /, ''), r)); }
+        try {
+          panel.ensure(); const cfgNow = CL.buildConfig(v); const r = await fn(cfgNow, testKey.value.trim()); out.replaceChildren(resultNode(label.replace(/^(Test|Validate|Fetch|Run) /, ''), r));
+          if (counts && r && r.ok === true && !r.skipped) checkedSig = CL.configSignature(cfgNow);   // Part 80: a real connection check passed for exactly this configuration
+        }
         finally { checkBtns.forEach((b) => { b.disabled = false; }); btn.textContent = old; }
       }
+      // Part 80: provider presets (new providers only): fill the settings, never a key. Everything stays editable.
+      const preset = sel('aip-preset', CL.PRESETS.map((p) => [p.id, p.label]), 'custom');
+      preset.addEventListener('change', () => {
+        const p = CL.presetById(preset.value); if (!p.fill) return;
+        adapter.value = 'openai_compat'; if (!existing) { key.value = p.fill.provider; title.value = p.fill.title; }
+        base.value = p.fill.base_url; chatPath.value = p.fill.chat_path; modelsPath.value = p.fill.models_path; authScheme.value = 'bearer'; url.value = p.fill.key_url; hint.value = p.fill.key_hint;
+        checkedSig = ''; out.replaceChildren(); syncKind();
+      });
       const needKey = (k) => (k ? null : { ok: false, stage: 'request', classification: 'INVALID_API_KEY', error: 'Enter the API key for these checks first. It is used once and not saved.' });
       const needModel = () => testModel.value.trim();
       const checks = h('div', { class: 'card compat-checks', id: 'aip-checks', style: 'margin-top:10px' }, h('h3', {}, 'Check this provider'),
         h('p', { class: 'hint' }, 'Nothing is saved by these buttons. “Validate” and “Test Connection” need no key.'), panel.el,
         h('div', { class: 'field' }, h('label', {}, 'API key (only for this check; never stored or sent to the database)'), testKey),
         h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' },
-          checkBtn('aip-b-validate', 'Validate Configuration', (cfg) => bridge.run('validate', cfg)),
+          checkBtn('aip-b-validate', 'Validate Configuration', (cfg) => bridge.run('validate', cfg), false),
           checkBtn('aip-b-connect', 'Test Connection', (cfg) => bridge.run('connect', cfg)),
           checkBtn('aip-b-auth', 'Test Authentication', async (cfg, k) => needKey(k) || bridge.run('auth', cfg, k)),
           checkBtn('aip-b-models', 'Fetch Models', async (cfg, k) => {
@@ -1742,6 +1774,7 @@
         return true;                                                         // the provider dialog stays open until the confirmation is accepted
       };
       modal(existing ? `Edit ${f.provider}` : 'Add provider', h('div', {},
+        existing ? null : h('div', { class: 'field' }, h('label', {}, 'Start from'), preset),
         h('div', { class: 'field' }, h('label', {}, 'Adapter type'), adapter),
         h('div', { class: 'field' }, h('label', {}, 'Provider key (no spaces; cannot change later)'), key),
         h('div', { class: 'field' }, h('label', {}, 'Display name'), title),
@@ -1756,18 +1789,23 @@
         { label: 'Save', cls: 'primary', run: save }]);
 
       function confirmSave(k, cfg, base_, isEnabled, isEdit, closeOuter) {
+        // Part 80: a provider is published (enabled for users) only when a real connection check passed for exactly this configuration, or the admin accepts publishing without one.
+        const verified = !!checkedSig && checkedSig === CL.configSignature(cfg);
+        const accept = h('input', { type: 'checkbox', id: 'aip-publish-unchecked' });
+        const gate = isEnabled && !verified ? h('div', { class: 'field', id: 'aip-gate' }, h('p', { class: 'hint', style: 'color:#e5a24c' }, 'No connection check has passed for this configuration in this dialog. Unless you tick the box below, it is saved DISABLED (not offered to users).'), h('label', {}, accept, ' Publish to users without a passing check')) : null;
         const lines = [['Provider', `${base_.p_title} (${k})`], ['Base URL', cfg.base_url], ['Authentication', cfg.auth_scheme === 'header' ? `Header ${cfg.auth_header}` : 'Bearer token'],
-          ['Model list', cfg.models_path ? cfg.models_path : 'none'], ['Status', (isEnabled ? 'Enabled' : 'Disabled') + (base_.p_hidden ? ', hidden' : '')]];
+          ['Model list', cfg.models_path ? cfg.models_path : 'none'], ['Status', (isEnabled ? 'Enabled' : 'Disabled') + (base_.p_hidden ? ', hidden' : '')], ['Checked', verified ? 'Yes — a connection check passed' : 'No']];
         modal(isEdit ? `Save changes to ${k}?` : `Add ${k}?`, h('div', {},
           h('table', { class: 'inner-table' }, h('tbody', {}, lines.map(([a, b]) => h('tr', {}, h('th', {}, a), h('td', {}, String(b)))))),
           h('p', { class: 'hint' }, 'Only these settings are saved to the catalogue. No API key is stored: users keep their own keys on their computers. Saving may change what users see after their next catalogue refresh.'),
-          h('p', { class: 'hint', id: 'aip-confirm-err', style: 'color:#e5686b' })), [
+          gate, h('p', { class: 'hint', id: 'aip-confirm-err', style: 'color:#e5686b' })), [
           { label: 'Back', run: (cl) => cl() },
           { label: isEdit ? 'Save changes' : 'Add provider', cls: 'primary', run: async (cl) => {
             const box = document.getElementById('aip-confirm-err');
             try {
-              const r = await rpc('admin_upsert_ai_openai_provider', Object.assign({}, base_, { p_config: cfg, p_enabled: isEnabled }));
-              applyCatalog(r); toast('Provider saved'); cl(); closeOuter();
+              const pub = CL.publishEnabled(isEnabled, checkedSig, cfg, accept.checked);
+              const r = await rpc('admin_upsert_ai_openai_provider', Object.assign({}, base_, { p_config: cfg, p_enabled: pub }));
+              applyCatalog(r); toast(isEnabled && !pub ? 'Provider saved disabled (not checked)' : 'Provider saved'); cl(); closeOuter();
             } catch (e) { if (box) box.textContent = CL.friendlyDbError(e.message); return true; }
           } }]);
       }
